@@ -109,6 +109,9 @@ function fixture(ticked: string[] = ["Q1"]) {
 
 const openSection = (name: string) =>
   act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === name)!.click());
+/** Show one plot by its tab over the preview: the preview and the Plots section then hold that plot alone. */
+const showPlot = (name: string) =>
+  act(() => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="Plots"] [role="tab"]')].find((b) => b.textContent === name)!.click());
 const button = (text: string) => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === text)!;
 const pickers = () =>
   [...host.querySelectorAll<HTMLLabelElement>(".gl-figure-plot-editor label")]
@@ -125,7 +128,7 @@ describe("Illustration: populations picked in the Data tree, used by each plot",
     const fx = fixture(["Q1"]);
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    openSection("Plots");
+    openSection("Plot");
     const add = button("Add summary panel");
     expect(add.title).toBe("One chart across the files, a mark per file, with the selected populations together");
     act(() => add.click());
@@ -141,7 +144,10 @@ describe("Illustration: populations picked in the Data tree, used by each plot",
     });
     expect(figure().plots[1].population).toBeUndefined();
     expect(figure().plots[1].populations).toBeUndefined();
-    expect(pickers()[1].value).toBe("__together__");
+    // The plot added is the one shown, so its editor is the one in Plots and its panel the preview's.
+    expect(host.querySelector<HTMLButtonElement>('[aria-label="Plots"] [role="tab"][aria-selected="true"]')!.textContent).toBe("Summary 2");
+    expect(pickers()).toHaveLength(1);
+    expect(pickers()[0].value).toBe("__together__");
     expect(host.querySelectorAll(".gl-figure-chart")).toHaveLength(1);
     expect(host.querySelector<HTMLTableCellElement>("td[data-figure-panel][colspan='3']")).not.toBeNull();
     expect(host.querySelector(".gl-figure-chart")!.getAttribute("aria-label")).toBe("Summary 2; 3 cells");
@@ -151,6 +157,9 @@ describe("Illustration: populations picked in the Data tree, used by each plot",
     root = createRoot(host);
     figure().populations = ["Q1", "Q2", "Q3"].map(fx.ref);
     act(() => root.render(<IllustrationTab {...fx.props} />));
+    await flush();
+    // A fresh mount shows the first plot, the histogram; the summary is a tab away.
+    showPlot("Summary 2");
     await flush();
     const charts = host.querySelectorAll(".gl-figure-chart");
     expect(charts).toHaveLength(1);
@@ -174,6 +183,9 @@ describe("Illustration: populations picked in the Data tree, used by each plot",
     const onAddToLayout = vi.fn();
     act(() => root.render(<IllustrationTab {...fx.props} onAddToLayout={onAddToLayout} />));
     await flush();
+    // "Add panels to Layout" takes the shown plot's panels: the summary's tab is shown first.
+    showPlot("Summary");
+    await flush();
     openSection("Export");
     act(() => button("Add panels to Layout").click());
     const [recipes] = onAddToLayout.mock.calls[0];
@@ -189,7 +201,7 @@ describe("Illustration: populations picked in the Data tree, used by each plot",
     const fx = fixture(["Q1", "Q2"]);
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    openSection("Plots");
+    openSection("Plot");
     const [picker] = pickers();
     const options = [...picker.options].map((o) => o.textContent);
     expect(options[0]).toBe("Each selected population in its own panel");
@@ -236,7 +248,7 @@ describe("Illustration: populations picked in the Data tree, used by each plot",
     fx.props.configRef.current!.figure!.plots[0].populations = ["Q2", "Q4"].map(fx.ref);
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    openSection("Plots");
+    openSection("Plot");
     const [picker] = pickers();
     expect(picker.value).toBe("__overlay__");
     expect(picker.selectedOptions[0].textContent).toBe("Its own list…");
@@ -249,7 +261,7 @@ describe("Illustration: populations picked in the Data tree, used by each plot",
     await flush();
     openSection("Data");
     expect(host.querySelector("#figure-section-data")?.textContent ?? host.textContent).toContain(
-      "Ticked populations are drawn by every plot set to follow them (Plots → Populations).",
+      "Ticked populations are drawn by every plot set to follow them (Plot → Populations).",
     );
   });
 });

@@ -13,6 +13,7 @@ export const LAYOUT_OBJECTS_JA: Readonly<Record<string, string>> = {
   "{channel} per cell": "細胞ごとの {channel}",
   "legend": "凡例",
   "images": "画像",
+  "1 cell": "1 細胞",
   "{count} cells": "{count} 細胞",
   "{population} strategy": "{population} のゲーティング戦略",
   "Show {name}": "{name} を表示",

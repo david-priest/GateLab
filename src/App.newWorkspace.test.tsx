@@ -10,7 +10,13 @@ vi.mock("./plots/GatingPlot", () => ({
   GatingPlot: () => <div data-testid="gating-plot" />,
 }));
 
+vi.mock("./engine/workspace", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./engine/workspace")>();
+  return { ...actual, readWorkspaceEnvelopeFromFile: vi.fn(actual.readWorkspaceEnvelopeFromFile) };
+});
+
 import App from "./App";
+import { readWorkspaceEnvelopeFromFile, type WorkspaceFile } from "./engine/workspace";
 
 const syntheticFcs: FcsFile = {
   version: "FCS3.1",
@@ -153,6 +159,56 @@ describe("App New Workspace", () => {
     expect(downloads).toEqual(["test.gatelab"]);
     expect(host.textContent).toContain("test.fcs");
     expect(host.textContent).toContain("Downloaded test.gatelab. The workspace is not marked saved.");
+  });
+
+  it("names the download after the workspace file it was opened from", async () => {
+    const workspace = {
+      format: "gatelab-workspace",
+      version: 2,
+      workspaceId: "workspace-download-name",
+      savedAt: "2026-10-13T00:00:00.000Z",
+      app: "GateLab",
+      samples: [{ fileName: "Sample 1.fcs", dataPath: "data/0_Sample 1.fcs", logicleW: {}, compensationOn: false }],
+      activeSample: 0,
+      gating: {
+        gates: {},
+        gate_order: [],
+        populations: {
+          root: { population_id: "root", name: "All Events", gate_refs: [], gate_logic: "and", parent_id: null, children: [], event_count: null, percent_of_parent: 100 },
+        },
+        root_population_id: "root",
+        active_population_id: "root",
+        selected_gate_id: null,
+      },
+      scales: { globalScales: {} },
+      display: { xChannel: "FSC-A", yChannel: "SSC-A", mode: "pseudocolor", maxEvents: 50000, contourThreshold: 5 },
+    } as WorkspaceFile;
+    vi.mocked(readWorkspaceEnvelopeFromFile).mockResolvedValueOnce({
+      raw: workspace, fcsByPath: { "data/0_Sample 1.fcs": Uint8Array.from([70, 67, 83]) }, storage: "bundle", portableAssays: null,
+    });
+    const downloads: string[] = [];
+    vi.stubGlobal("URL", Object.assign(Object.create(URL), { createObjectURL: () => "blob:test", revokeObjectURL: () => undefined }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
+      downloads.push(this.download);
+    });
+    try {
+      act(() => root.render(<App />));
+      const input = host.querySelector<HTMLInputElement>('input[type="file"][accept^=".gatelab"]')!;
+      Object.defineProperty(input, "files", { configurable: true, value: [new File([], "Study workspace.gatelab")] });
+      await act(async () => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await settle();
+      expect(host.textContent).toContain("Sample 1.fcs");
+      act(() => button("New Workspace…")!.click());
+      await act(async () => button("Save first")!.click());
+      await settle();
+    } finally {
+      click.mockRestore();
+    }
+
+    expect(downloads).toEqual(["Study_workspace.gatelab"]);
   });
 
   it("keeps the workspace open when Save first's dialog is cancelled", async () => {

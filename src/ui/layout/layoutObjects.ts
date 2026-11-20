@@ -81,7 +81,7 @@ export function defaultObjectName(item: LayoutItem, naming: ObjectNaming, t: Tra
     return which.length ? `${chart} · ${which.join(" · ")}` : chart;
   }
   if (recipe.kind === "imagewall") return `${recipe.populationName || t("Population")} · ${recipe.fileName || t("images")}`;
-  if (recipe.kind === "cellpanel") return `${t("{count} cells", { count: recipe.cells.length })} · ${recipe.fileName || t("images")}`;
+  if (recipe.kind === "cellpanel") return `${recipe.cells.length === 1 ? t("1 cell") : t("{count} cells", { count: recipe.cells.length })} · ${recipe.fileName || t("images")}`;
   if (recipe.kind === "image") return recipe.fileName;
   if (!("sampleId" in recipe) || !("populationId" in recipe)) return objectKindWord(item, t);
   const population = naming.populationName(recipe.sampleId, recipe.populationId) ?? t("Population");

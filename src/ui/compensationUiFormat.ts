@@ -56,3 +56,17 @@ export function compensationMatrixCellAppearance(
     color: luminance < 0.25 ? "#ffffff" : "#26384e",
   };
 }
+
+/** An isotope written mass first (141Pr) or element first (Pr141), with the "Di" mass-cytometry suffix. */
+const ISOTOPE = /(?:\d{2,3}[A-Z][a-z]?|[A-Z][a-z]?\d{2,3})(?:Di)?(?![a-z])/g;
+
+/**
+ * Whether a mass-cytometry channel carries a marker name: its name (a Panel-tab rename, else
+ * $PnS) holds something beyond isotope labels and separators. "141Pr_CCR6" and "103Rh_DNA" are
+ * named; "131Xe", "Cs133Di", an empty name or a name equal to $PnN are not.
+ */
+export function isMarkerNamedChannel(name: string | null | undefined, pnn: string): boolean {
+  const text = (name ?? "").trim();
+  if (!text || text === pnn.trim()) return false;
+  return /[A-Za-z0-9]/.test(text.replace(ISOTOPE, " "));
+}

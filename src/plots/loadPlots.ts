@@ -4,7 +4,7 @@
 // (the global entry, cytof_plot.js:1673/1844) and receive gate interactions via the
 // shim's `on(...)` (the modules call `Shiny.setInputValue(...)` on drag-end etc.).
 
-import { installShim, type PlotBus } from "./shiny-shim";
+import { createPlotBus, installShim, type PlotBus } from "./shiny-shim";
 import d3Src from "../../vendor/GateLabR/inst/app/www/d3.v7.min.js?raw";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
@@ -537,6 +537,92 @@ export function patchPlotWidthFloor(src: string): string {
   return src.replace(needle, patched);
 }
 
+/**
+ * The plot is laid out again when the area it sits in changes width by more than 30 px; within
+ * that it keeps the side it was first drawn at. With several plots on the Gating tab, each in a
+ * cell of one size, that left plots a few px apart in size and place, so their 1 px axes and
+ * frames fell on different pixels and some read heavier than others. A container marked
+ * data-exact-size is laid out again at any change of width, so every plot takes its cell's size.
+ */
+export function patchExactPlotSize(src: string): string {
+  const needle = "if (_chkW >= 50 && Math.abs(_targetW - PLOT_W) > 30) _init();";
+  const patched = "if (_chkW >= 50 && Math.abs(_targetW - PLOT_W) > (ctnr.hasAttribute('data-exact-size') ? 0 : 30)) _init(); // GateLab: data-exact-size";
+  // The size it compares with is the one _init gives, under the 300 px floor (patchPlotWidthFloor):
+  // under the original 380 px one, a plot in an area under 412 px wide was laid out again at every render.
+  const targetNeedle = "var _targetW = Math.min(Math.max(380, _chkW - 32), 630);";
+  const targetPatched = "var _targetW = Math.min(Math.max(300, _chkW - 32), 630); // GateLab: the floor _init uses";
+  // Already applied, perhaps since extended by patchPlotSide.
+  if (src.includes("_init(); // GateLab: data-exact-size")) return src;
+  if (src.split(needle).length !== 2 || src.split(targetNeedle).length !== 2) {
+    console.warn("[GateLab] cytof exact-size patch did not match — several plots may differ in size by a few px.");
+    return src;
+  }
+  return src.replace(targetNeedle, targetPatched).replace(needle, patched);
+}
+
+/**
+ * No outer tick at either end of an axis. d3 draws one, 6 px long, at each end of the axis line
+ * unless told not to; the decade axes were told (tickSizeOuter(0) in _buildLogicleAxis), the
+ * evenly spaced and the scatter-log axes were not, so a CyTOF plot drew a short stray tick at the
+ * top and bottom of its Y axis and at both ends of its X axis (David, 2026-11-20).
+ */
+export function patchNoOuterTicks(src: string): string {
+  const pairs: [string, string][] = [
+    ["d3.axisBottom(zx).ticks(6))", "d3.axisBottom(zx).ticks(6).tickSizeOuter(0))"],
+    ["d3.axisLeft(zy).ticks(6))", "d3.axisLeft(zy).ticks(6).tickSizeOuter(0))"],
+    ["d3.axisBottom(zx).ticks(5).tickFormat(_scatterTickFormat(xScCf))", "d3.axisBottom(zx).ticks(5).tickFormat(_scatterTickFormat(xScCf)).tickSizeOuter(0)"],
+    ["d3.axisLeft(zy).ticks(5).tickFormat(_scatterTickFormat(yScCf))", "d3.axisLeft(zy).ticks(5).tickFormat(_scatterTickFormat(yScCf)).tickSizeOuter(0)"],
+  ];
+  let out = src;
+  for (const [needle, patched] of pairs) {
+    if (out.includes(patched)) continue;
+    if (out.split(needle).length !== 2) {
+      console.warn(`[GateLab] cytof outer-tick patch did not match ${needle}; that axis keeps its end ticks.`);
+      continue;
+    }
+    out = out.replace(needle, patched);
+  }
+  return out;
+}
+
+/** The bounds of a plot side set by its resize grip (data-plot-side), in px. */
+export const PLOT_SIDE_RANGE: [number, number] = [300, 1200];
+
+/**
+ * A plot side set by the user: a container carrying data-plot-side is drawn at that side (within
+ * PLOT_SIDE_RANGE) instead of one fitted to the area it sits in, and is laid out again as soon as
+ * it changes. Without the attribute nothing changes. Applied after patchPlotWidthFloor and
+ * patchExactPlotSize, whose lines it extends.
+ */
+export function patchPlotSide(src: string): string {
+  const side = (fallback: string) =>
+    `(ctnr.hasAttribute('data-plot-side') ? Math.max(${PLOT_SIDE_RANGE[0]}, Math.min(${PLOT_SIDE_RANGE[1]}, Number(ctnr.getAttribute('data-plot-side')) || ${fallback})) : ${fallback})`;
+  const pairs: [string, string][] = [
+    [
+      "PLOT_W = Math.min(Math.max(300, _availW - 32), 630); // GateLab: 300 px floor, for phones",
+      `PLOT_W = Math.min(Math.max(300, _availW - 32), 630); // GateLab: 300 px floor, for phones\n        PLOT_W = ${side("PLOT_W")}; // GateLab: data-plot-side`,
+    ],
+    [
+      "var _targetW = Math.min(Math.max(300, _chkW - 32), 630); // GateLab: the floor _init uses",
+      `var _targetW = Math.min(Math.max(300, _chkW - 32), 630); // GateLab: the floor _init uses\n            _targetW = ${side("_targetW")}; // GateLab: data-plot-side`,
+    ],
+    [
+      "(ctnr.hasAttribute('data-exact-size') ? 0 : 30)) _init(); // GateLab: data-exact-size",
+      "(ctnr.hasAttribute('data-exact-size') || ctnr.hasAttribute('data-plot-side') ? 0 : 30)) _init(); // GateLab: data-exact-size",
+    ],
+  ];
+  let out = src;
+  for (const [needle, patched] of pairs) {
+    if (out.includes(patched)) continue;
+    if (out.split(needle).length !== 2) {
+      console.warn("[GateLab] cytof plot-side patch did not match; the plot's resize grip has no effect.");
+      return src;
+    }
+    out = out.replace(needle, patched);
+  }
+  return out;
+}
+
 export function patchCytofForGateLab(src: string): string {
   let out = src;
   if (!out.includes("var _glEll = ")) out = ELLIPSE_PIXEL_GEOMETRY_SRC + out;
@@ -545,6 +631,9 @@ export function patchCytofForGateLab(src: string): string {
   out = patchPolygonDraftKeys(out);
   out = patchControlUnderlay(out);
   out = patchPlotWidthFloor(out);
+  out = patchExactPlotSize(out);
+  out = patchNoOuterTicks(out);
+  out = patchPlotSide(out);
 
   // In Shiny the plot bundle boots itself after a short delay, because the container may
   // appear after the script. GateLab's React wrapper instead calls render() as soon as the
@@ -3249,6 +3338,55 @@ export function loadPlots(): { CytofD3: CytofD3Api; bus: PlotBus } {
   }
   cached = { CytofD3, bus };
   return cached;
+}
+
+/** The id of the element the gating plot of this instance draws into; instance 0 is the page's first plot. */
+export function plotContainerId(instance: number): string {
+  return instance === 0 ? "cytof-plot-container" : `cytof-plot-container-${instance + 1}`;
+}
+
+/**
+ * The patched gating-plot script as one more instance of it reads it: its own container, its own
+ * clip paths (an id is the page's, and a second plot's `url(#cytof-clip)` would resolve to the
+ * first plot's rectangle), and its api on the object it is handed. Exported for its test.
+ */
+export function gatingPlotInstanceSource(patched: string, instance: number): string {
+  const expect = (needle: string) => {
+    if (!patched.includes(needle)) throw new Error(`[GateLab] the gating plot script no longer contains ${needle}; a second plot cannot be made from it.`);
+  };
+  expect("'cytof-plot-container'");
+  expect("window.CytofD3");
+  expect("cytof-clip");
+  return patched
+    .split("'cytof-plot-container'").join(JSON.stringify(plotContainerId(instance)))
+    .split("window.CytofD3").join("__gatelabPlot.CytofD3")
+    .split("cytof-clip").join(`cytof-clip-i${instance + 1}`);
+}
+
+const plotInstances = new Map<number, { CytofD3: CytofD3Api; bus: PlotBus }>();
+
+/**
+ * The gating plot's engine for one plot of several. Instance 0 is loadPlots(): the script as it
+ * has always been evaluated. Each further instance is the same patched script evaluated again as
+ * a function, so its state (canvas, zoom, gate drafts, pending edits) is its own, drawing into
+ * plotContainerId(instance) and reporting to a bus of its own.
+ */
+export function loadPlotInstance(instance: number): { CytofD3: CytofD3Api; bus: PlotBus } {
+  if (instance === 0) return loadPlots();
+  const existing = plotInstances.get(instance);
+  if (existing) return existing;
+  loadPlots(); // d3, and the page's shim for the script's `window.Shiny` checks
+  const { shim, bus } = createPlotBus();
+  const holder: { CytofD3?: CytofD3Api } = {};
+  const source = gatingPlotInstanceSource(patchGateInk(patchGateLineWidth(patchCytofForGateLab(cytofSrc))), instance);
+  // `Shiny` is a parameter here, so the script's bare references reach this instance's bus.
+  new Function("Shiny", "__gatelabPlot", source)(shim, holder);
+  if (!holder.CytofD3 || typeof holder.CytofD3.render !== "function") {
+    throw new Error("[GateLab] a further gating plot failed to load from the GateLabR D3 bundle.");
+  }
+  const made = { CytofD3: holder.CytofD3, bus };
+  plotInstances.set(instance, made);
+  return made;
 }
 
 /** Access the mini-plot grid renderer (loads the bundle if needed). */

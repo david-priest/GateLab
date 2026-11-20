@@ -46,6 +46,57 @@ export type CompensationProfileOrigin =
       /** Made in GateLab by hand, from a matrix that started as the identity: no spillover. */
       readonly type: "manual";
       readonly startedAs: "identity";
+    }
+  | {
+      /** Calculated in GateLab from single-stained controls. */
+      readonly type: "calculated";
+      /**
+       * How each coefficient was estimated, as a portable identifier with its version.
+       * "median-difference" is the ratio of median differences, positive against negative events.
+       * Left open so that another estimator is a new identifier and not a new record format.
+       */
+      readonly estimator: string;
+      readonly estimatorVersion: string;
+      /** Where each source channel's row of the matrix came from; one entry per channel, none twice. */
+      readonly controls: readonly CalculatedMatrixControl[];
+    };
+
+/** A set of events a control was read from. */
+export interface CalculatedControlEvents {
+  /** Source FCS name. Preserved exactly; not a scientific identity. */
+  readonly fileName: string;
+  /** SHA-256 of the exact original FCS bytes, when available. */
+  readonly fileDigest?: Sha256Digest;
+  /** How many events were used. */
+  readonly count: number;
+  /** The gated population the events were limited to, by name, where one was. */
+  readonly population?: string;
+  /** Bounds on the control's own channel, raw units: lower inclusive, upper exclusive. */
+  readonly lower?: number;
+  readonly upper?: number;
+}
+
+/** One source channel of a calculated matrix. */
+export type CalculatedMatrixControl =
+  | {
+      readonly channel: string;
+      /** The row was calculated from a control. */
+      readonly row: "control";
+      /** The events the signal was read from: the positive events of a median-difference estimate. */
+      readonly events: CalculatedControlEvents;
+      /** The negative events they were compared with; absent for an estimator that uses none. */
+      readonly negative?: CalculatedControlEvents;
+    }
+  | {
+      readonly channel: string;
+      /** No control: the row was copied from another matrix (the files' embedded one). */
+      readonly row: "fallback";
+      readonly fromMatrixHash?: Sha256Digest;
+    }
+  | {
+      readonly channel: string;
+      /** No control and no other matrix: the row holds no spillover. */
+      readonly row: "none";
     };
 
 export interface EstimationSoftware {
@@ -482,7 +533,97 @@ function canonicalOrigin(value: unknown): CompensationProfileOrigin {
     }
     return Object.freeze({ type: "manual", startedAs: "identity" });
   }
+  if (origin.type === "calculated") {
+    assertExactKeys(origin, ["type", "estimator", "estimatorVersion", "controls"], "calculated origin");
+    assertRequiredKeys(origin, ["type", "estimator", "estimatorVersion", "controls"], "calculated origin");
+    const estimator = canonicalId(origin.estimator, "estimator");
+    const estimatorVersion = canonicalId(origin.estimatorVersion, "estimatorVersion");
+    if (
+      !Array.isArray(origin.controls) ||
+      origin.controls.length < 1 ||
+      origin.controls.length > MAX_CALCULATED_CONTROLS
+    ) {
+      throw new Error(`A calculated compensation origin lists 1 to ${MAX_CALCULATED_CONTROLS} channels.`);
+    }
+    const controls = origin.controls.map(canonicalCalculatedControl);
+    if (new Set(controls.map((control) => control.channel)).size !== controls.length) {
+      throw new Error("A calculated compensation origin lists a channel twice.");
+    }
+    return Object.freeze({
+      type: "calculated",
+      estimator,
+      estimatorVersion,
+      controls: Object.freeze(controls),
+    });
+  }
   throw new Error(`Unsupported compensation profile origin '${String(origin.type)}'.`);
+}
+
+const MAX_CALCULATED_CONTROLS = 1024;
+
+function canonicalCalculatedEvents(value: unknown, label: string): CalculatedControlEvents {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  const events = value as Record<string, unknown>;
+  assertExactKeys(events, ["fileName", "fileDigest", "count", "population", "lower", "upper"], label);
+  assertRequiredKeys(events, ["fileName", "count"], label);
+  const fileName = preservedFileName(events.fileName);
+  const fileDigest =
+    events.fileDigest === undefined ? undefined : canonicalDigest(events.fileDigest, `${label} fileDigest`);
+  if (!Number.isSafeInteger(events.count) || (events.count as number) < 0) {
+    throw new Error(`${label} count must be a whole number of events.`);
+  }
+  const population = optionalDescriptiveText(events.population, `${label} population`);
+  for (const bound of ["lower", "upper"] as const) {
+    if (events[bound] !== undefined && (typeof events[bound] !== "number" || !Number.isFinite(events[bound]))) {
+      throw new Error(`${label} ${bound} must be a finite number when present.`);
+    }
+  }
+  return Object.freeze({
+    fileName,
+    ...(fileDigest ? { fileDigest } : {}),
+    count: events.count as number,
+    ...(population ? { population } : {}),
+    ...(events.lower !== undefined ? { lower: events.lower as number } : {}),
+    ...(events.upper !== undefined ? { upper: events.upper as number } : {}),
+  });
+}
+
+function canonicalCalculatedControl(value: unknown): CalculatedMatrixControl {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("A calculated compensation origin control must be an object.");
+  }
+  const control = value as Record<string, unknown>;
+  if (typeof control.channel !== "string" || control.channel.length === 0) {
+    throw new Error("A calculated compensation origin control must name its channel.");
+  }
+  assertJsonString(control.channel, "Calculated origin channel", 1024);
+  const channel = control.channel;
+  if (control.row === "control") {
+    assertExactKeys(control, ["channel", "row", "events", "negative"], "calculated origin control");
+    return Object.freeze({
+      channel,
+      row: "control",
+      events: canonicalCalculatedEvents(control.events, "Calculated origin events"),
+      ...(control.negative !== undefined
+        ? { negative: canonicalCalculatedEvents(control.negative, "Calculated origin negative events") }
+        : {}),
+    });
+  }
+  if (control.row === "fallback") {
+    assertExactKeys(control, ["channel", "row", "fromMatrixHash"], "calculated origin fallback row");
+    const fromMatrixHash =
+      control.fromMatrixHash === undefined
+        ? undefined
+        : canonicalDigest(control.fromMatrixHash, "Calculated origin fromMatrixHash");
+    return Object.freeze({ channel, row: "fallback", ...(fromMatrixHash ? { fromMatrixHash } : {}) });
+  }
+  if (control.row === "none") {
+    assertExactKeys(control, ["channel", "row"], "calculated origin empty row");
+    return Object.freeze({ channel, row: "none" });
+  }
+  throw new Error("A calculated compensation origin control has an unsupported row source.");
 }
 
 function canonicalEstimationSoftware(value: unknown): EstimationSoftware {

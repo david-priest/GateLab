@@ -146,7 +146,7 @@ export function proportionPanelLayout(
   let innerWidth = innerAt(margin.left);
   const step = labels.length ? innerWidth / labels.length : innerWidth;
   const longestLabelPx = longestLabelWidth(labels, tickFont);
-  const rotateLabels = labelsRotate(longestLabelPx, step, 70);
+  const rotateLabels = labelsRotate(longestLabelPx, step, 70, labelWidths(labels, tickFont));
   if (rotateLabels) {
     margin.bottom = rotatedLabelsBottom(longestLabelPx, 68);
     // The first labels, turned, reach left past the plot; the margin makes room for them (drawn shortened to 30 characters).

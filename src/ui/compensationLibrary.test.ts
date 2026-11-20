@@ -4,6 +4,8 @@ import { serializeCompensationMatrixCsv } from "../engine/compensationMatrixExpo
 import {
   createCompensationBaselineProfile,
   createCompensationProfileRevision,
+  createResetToBaselineRevision,
+  type BaselineCompensationProfileRecord,
   type CompensationProfileRecord,
 } from "../engine/compensationProfileRecord";
 import type { FcsFile } from "../engine/fcs";
@@ -39,7 +41,11 @@ function flowFcs(second = "FL2-A"): FcsFile {
   };
 }
 
-async function profile(profileId: string, spill: number): Promise<CompensationProfileRecord> {
+async function profile(
+  profileId: string,
+  spill: number,
+  origin: CompensationProfileRecord["origin"] = { type: "uploaded", fileName: `${profileId}.csv`, format: "csv", sourceColumnHeader: "channel" },
+): Promise<CompensationProfileRecord> {
   const canonical = validateAndCanonicalizeCompensationMatrix({
     sourceChannels: ["FL1-A", "FL2-A"],
     receiverChannels: ["FL1-A", "FL2-A"],
@@ -56,7 +62,7 @@ async function profile(profileId: string, spill: number): Promise<CompensationPr
     profileId,
     name: `${profileId} matrix`,
     createdAt: "2026-10-23T00:00:00.000Z",
-    origin: { type: "uploaded", fileName: `${profileId}.csv`, format: "csv", sourceColumnHeader: "channel" },
+    origin,
   });
 }
 
@@ -68,6 +74,25 @@ function state(
 }
 
 describe("the Matrices list's rows", () => {
+  it("shows a calculated matrix as calculated, with the number of rows that came from a control", async () => {
+    const calculated = await profile("c", 0.2, {
+      type: "calculated",
+      estimator: "median-difference",
+      estimatorVersion: "1",
+      controls: [
+        {
+          channel: "FL1-A",
+          row: "control",
+          events: { fileName: "FL1 control.fcs", count: 2000 },
+          negative: { fileName: "Unstained.fcs", count: 5000 },
+        },
+        { channel: "FL2-A", row: "none" },
+      ],
+    });
+    const rows = buildMatrixLibrary(state([{ baselineProfileId: "c", records: [calculated] }]), [], []);
+    expect(rows[0]).toMatchObject({ source: { type: "calculated", controls: 1 }, canDelete: true });
+  });
+
   it("lists every lineage, and an embedded matrix once and only when no row shows it", async () => {
     const d1 = await embeddedFlowMatrixOf(new Sample(flowFcs()), "D1.fcs");
     const d2 = await embeddedFlowMatrixOf(new Sample(flowFcs()), "D2.fcs");
@@ -130,6 +155,94 @@ describe("the Matrices list's rows", () => {
     const d1 = await embeddedFlowMatrixOf(new Sample(flowFcs()), "D1.fcs");
     const rows = buildMatrixLibrary(state([]), [d1!], [{ kind: "embedded", key: d1!.key }, null]);
     expect(rows[0]).toMatchObject({ active: true, filesUsing: 1, unusable: null });
+  });
+});
+
+describe("a matrix's versions", () => {
+  const flowEdit = async (parent: CompensationProfileRecord, spill: number, profileId: string, createdAt: string) =>
+    createCompensationProfileRevision(parent, {
+      kind: "flow-spillover",
+      method: "matrix-inverse",
+      solverVersion: "flow-lu-v1",
+      solverSettings: { singularTolerance: 1e-12, conditionWarningThreshold: 1e8 },
+      matrix: (await profile("x", spill)).scientific.matrix,
+    }, { profileId, createdAt });
+
+  it("lists every record of a lineage, the baseline first and then in the order made, with what each was edited from", async () => {
+    const base = await profile("a", 0.2) as BaselineCompensationProfileRecord;
+    const e1 = await flowEdit(base, 0.3, "a-e1", "2026-10-23T00:01:00.000Z");
+    const e2 = await flowEdit(e1, 0.4, "a-e2", "2026-10-23T00:02:00.000Z");
+    const r3 = await createResetToBaselineRevision(e2, base, { profileId: "a-r3", createdAt: "2026-10-23T00:03:00.000Z" });
+    // Back to version 2 and edited again: a second branch from it.
+    const e4 = await flowEdit(e1, 0.5, "a-e4", "2026-10-23T00:04:00.000Z");
+    const rows = buildMatrixLibrary(
+      state([{ baselineProfileId: "a", records: [base, e4, e1, r3, e2], name: "beads" }], "a-e4"),
+      [],
+      [{ kind: "profile", profileId: "a-e4" }, { kind: "profile", profileId: "a-e4" }],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].profile?.profileId).toBe("a-e4");
+    expect(rows[0].versions.map(({ profile: record, version, parentVersion, revisionReason, active, filesUsing, canDelete, name }) => [
+      record?.profileId, version, parentVersion, revisionReason, active, filesUsing, canDelete, name,
+    ])).toEqual([
+      ["a", 1, null, null, false, 0, false, "beads"],
+      ["a-e1", 2, 1, "edit", false, 0, false, "beads"],
+      ["a-e2", 3, 2, "edit", false, 0, false, "beads"],
+      ["a-r3", 4, 3, "reset-to-baseline", false, 0, true, "beads"],
+      ["a-e4", 5, 2, "edit", true, 2, false, "beads"],
+    ]);
+    // Each version's row carries its own matrix, to switch to, copy or export.
+    expect(rows[0].versions[2].matrix?.matrix).toEqual(e2.scientific.matrix.matrix);
+    expect(rows[0].versions[2].matrixHash).toBe(e2.matrixHash);
+    expect(rows[0].versions[2].source).toEqual({ type: "edited", from: "beads" });
+    expect(rows[0].versions.every(({ canRename, versions }) => !canRename && versions.length === 0)).toBe(true);
+  });
+
+  it("lists a CyTOF matrix's lineage, with its versions, only in a CyTOF list", async () => {
+    const canonical = validateAndCanonicalizeCompensationMatrix({
+      sourceChannels: ["Pr141Di", "Nd142Di"],
+      receiverChannels: ["Pr141Di", "Nd142Di", "Nd143Di"],
+      matrix: [[1, 0.02, 0.01], [0.01, 1, 0.03]],
+    }, "cytof-spillover");
+    if (!canonical.ok) throw new Error("invalid");
+    const cytof = (matrix: typeof canonical.value) => ({
+      kind: "cytof-spillover" as const,
+      method: "nnls" as const,
+      solverVersion: "coordinate-descent-qr-v1",
+      solverSettings: { tolerance: 1e-10, kktTolerance: 1e-9, maxIterations: 1000, adaptationVersion: "identity-backed-v1" },
+      matrix,
+      includedChannels: ["Pr141Di", "Nd142Di"],
+    });
+    const base = await createCompensationBaselineProfile(cytof(canonical.value) as never, {
+      profileId: "cytof-a",
+      name: "beads spillover",
+      createdAt: "2026-11-20T00:00:00.000Z",
+      origin: { type: "uploaded", fileName: "beads.csv", format: "csv", sourceColumnHeader: "" },
+    });
+    const staged = validateAndCanonicalizeCompensationMatrix({
+      sourceChannels: ["Pr141Di", "Nd142Di"],
+      receiverChannels: ["Pr141Di", "Nd142Di", "Nd143Di"],
+      matrix: [[1, 0.025, 0.01], [0.01, 1, 0.03]],
+    }, "cytof-spillover");
+    if (!staged.ok) throw new Error("invalid");
+    const edit = await createCompensationProfileRevision(base, cytof(staged.value) as never, {
+      profileId: "cytof-a-e1",
+      name: "beads spillover · edited",
+      createdAt: "2026-11-20T00:01:00.000Z",
+    });
+    const compensation = state([{ baselineProfileId: "cytof-a", records: [base, edit] }], "cytof-a-e1");
+    expect(buildMatrixLibrary(compensation, [], [], "flow-spillover")).toEqual([]);
+    const rows = buildMatrixLibrary(compensation, [], [{ kind: "profile", profileId: "cytof-a-e1" }], "cytof-spillover");
+    expect(rows.map(({ name, compensationKind, active, channelCount }) => [name, compensationKind, active, channelCount]))
+      .toEqual([["beads spillover · edited", "cytof-spillover", true, 2]]);
+    // Each version carries the matrix's own name, not the "… · edited" of the record in use.
+    expect(rows[0].versions.map(({ profile: record, active, name }) => [record?.profileId, active, name]))
+      .toEqual([["cytof-a", false, "beads spillover"], ["cytof-a-e1", true, "beads spillover"]]);
+    // An earlier version is copied as a CyTOF matrix with its NNLS channels.
+    const copy = await duplicateOfRow(rows[0].versions[0], "beads copy");
+    expect(copy.scientific).toMatchObject({ kind: "cytof-spillover", includedChannels: base.scientific.kind === "cytof-spillover" ? base.scientific.includedChannels : [] });
+    expect(copy.scientific.kind === "cytof-spillover" && [...copy.scientific.includedChannels].sort()).toEqual(["Nd142Di", "Pr141Di"]);
+    expect(copy.matrixHash).toBe(base.matrixHash);
   });
 });
 

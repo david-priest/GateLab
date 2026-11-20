@@ -1,9 +1,10 @@
 // figureHeatmap.ts — the summary heatmap of an Illustration figure as one matrix: rows are the
-// population × file combinations the page holds, columns the heatmap plots (one channel each),
+// population × file combinations the page holds, columns the heatmap plots' channels (a plot may
+// carry several),
 // each cell the panel's summary statistic. The matrix is scaled, ordered and coloured here, in
 // the manner of seekit::plotExprHeatmap1, and FigureHeatmap.tsx draws it.
 
-import type { FigurePage, FigurePanel, FigurePanelData } from "./figure";
+import { heatmapChannels, type FigurePage, type FigurePanel, type FigurePanelData } from "./figure";
 import type { IllustrationConfig } from "./workspace";
 import { dendrogramSegments, euclidean, hclustAverage, type Clustering } from "./hclust";
 
@@ -24,7 +25,12 @@ export interface HeatmapMatrixRow {
 }
 
 export interface HeatmapMatrixColumn {
+  /** Unique within the matrix: the plot and the channel. */
+  key: string;
   plotId: string;
+  /** The channel, and its place among the plot's channels (its index in the panel's summaries). */
+  channel: string;
+  channelIndex: number;
   label: string;
 }
 
@@ -96,8 +102,19 @@ const minmax = (values: (number | null)[]): (number | null)[] => {
 };
 
 /**
+ * A panel's value for one of its plot's channels: from the per-channel list, or for the first
+ * channel the single value a panel built before plots had several channels carries.
+ */
+function channelValue(config: Record<string, unknown> | null | undefined, list: string, single: string, channelIndex: number): unknown {
+  if (!config) return null;
+  const values = config[list];
+  if (Array.isArray(values)) return values[channelIndex] ?? null;
+  return channelIndex === 0 ? config[single] : null;
+}
+
+/**
  * Build the matrix for a page. Rows are the distinct population × file combinations among the
- * heatmap panels, in page order; columns the distinct heatmap plots, in page order. The file is
+ * heatmap panels, in page order; columns each heatmap plot's channels, plots in page order. The file is
  * named in a row label only when the rows hold more than one file.
  */
 export function buildHeatmapMatrix(
@@ -119,7 +136,10 @@ export function buildHeatmapMatrix(
     if (!columnIndex.has(panel.plot.id)) {
       columnIndex.set(panel.plot.id, columns.length);
       // The channel names the column: a plot is called "Plot 2" unless the user renamed it.
-      columns.push({ plotId: panel.plot.id, label: panel.plot.x || panel.plot.name });
+      const channels = heatmapChannels(panel.plot);
+      (channels.length ? channels : [""]).forEach((channel, channelIndex) =>
+        columns.push({ key: `${panel.plot.id}\u0000${channel}`, plotId: panel.plot.id, channel, channelIndex, label: channel || panel.plot.name }),
+      );
     }
     const key = `${panel.population.hierarchyId}|${panel.population.populationId}|${panel.samples.join(",")}`;
     if (!rowIndex.has(key)) {
@@ -127,6 +147,7 @@ export function buildHeatmapMatrix(
       rowsRaw.push({ key, population: panel.population.label, samples: panel.samples, count: 0, cells: new Map() });
     }
     const row = rowsRaw[rowIndex.get(key)!];
+    // The plot's first column; its other channels follow it, read from the same panel.
     row.cells.set(columnIndex.get(panel.plot.id)!, panel.key);
     const count = Number(panels[panel.key]?.config?.n_events);
     if (finite(count)) row.count = Math.max(row.count, count);
@@ -139,12 +160,12 @@ export function buildHeatmapMatrix(
       key: row.key,
       label: `${row.population}${suffix}`,
       count: row.count,
-      panelKeys: columns.map((_, c) => row.cells.get(c) ?? null),
+      panelKeys: columns.map((column, c) => row.cells.get(c - column.channelIndex) ?? null),
     };
   });
   const raw: (number | null)[][] = rows.map((row) =>
-    row.panelKeys.map((key) => {
-      const value = key ? panels[key]?.config?.figure_summary : null;
+    row.panelKeys.map((key, c) => {
+      const value = key ? channelValue(panels[key]?.config, "channel_summaries", "figure_summary", columns[c].channelIndex) : null;
       return finite(value) ? value : null;
     }),
   );
@@ -189,7 +210,7 @@ export function buildHeatmapMatrix(
       const points: { value: number; weight: number }[] = [];
       rows.forEach((row) => {
         const key = row.panelKeys[c];
-        const sketch = key ? (panels[key]?.config?.summary_quantiles as unknown) : null;
+        const sketch = key ? channelValue(panels[key]?.config, "channel_quantiles", "summary_quantiles", columns[c].channelIndex) : null;
         const count = key ? Number(panels[key]?.config?.n_events) : 0;
         if (!Array.isArray(sketch) || !sketch.length || !(count > 0)) return;
         const weight = count / sketch.length;

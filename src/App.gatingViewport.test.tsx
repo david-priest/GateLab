@@ -381,6 +381,22 @@ describe("App gating viewport invariant", () => {
     expect(ranges()).toEqual(auto);
   });
 
+  it("says which Layout sheet the plot went to", async () => {
+    act(() => root.render(<App />));
+    const fcsInput = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')]
+      .find((input) => !input.hasAttribute("webkitdirectory"))!;
+    Object.defineProperty(fcsInput, "files", { configurable: true, value: [testFile()] });
+    await act(async () => {
+      fcsInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const area = host.querySelector<HTMLElement>(".gl-plot-area")!;
+    act(() => { area.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
+    const add = [...host.querySelectorAll<HTMLButtonElement>('[role="menu"][aria-label="Plot"] [role^="menuitem"]')].find((b) => b.textContent === "Add to Layout")!;
+    act(() => add.click());
+    expect(host.querySelector(".gl-status-line")?.textContent).toBe("1 plot added to Layout 1 on the Layout tab.");
+  });
+
   it("swaps X and Y from a button in the plot card's bottom-left corner", async () => {
     // jsdom lays nothing out: the card is given a place and a size.
     const card = (el: Element) => el.classList.contains("gl-plot");

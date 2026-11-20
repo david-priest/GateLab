@@ -128,11 +128,13 @@ export function EditableMetaTable({
                   <td className="gl-stats-name">{r.name}</td>
                   {textColumns.map((c) => <td key={c.header} className="gl-stats-name gl-meta-readonly">{c.values[r.id] ?? ""}</td>)}
                   {r.fixed.map((v, i) => <td key={i} className="gl-stats-num">{v}</td>)}
-                  {columns.map((c) => {
+                  {columns.map((c, i) => {
                     const k = cellKey(r.id, c.name);
                     const val = values[r.id]?.[c.name] ?? "";
+                    // Keyed by place, not name: renaming a field, which the header's blur does as
+                    // the next cell is clicked, would otherwise replace that cell and lose its focus.
                     return (
-                      <td key={c.name} className="gl-meta-cell">
+                      <td key={i} className="gl-meta-cell">
                         <input
                           className={`gl-field-input gl-meta-input${wideColumns.includes(c.name) ? " is-wide" : ""}`}
                           value={draft[k] ?? val}

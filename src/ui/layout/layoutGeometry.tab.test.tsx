@@ -380,6 +380,19 @@ describe("An item's scale on the Layout tab", () => {
     expect(zoomOf(changes, ids[0])).toBeUndefined();
   });
 
+  it("shows a plot given a typed size smaller than it is drawn scaled, as a dragged one is", async () => {
+    const { changes, ids } = await threePlots();
+    select(ids[0]);
+    type(input("Item width"), "30");
+    type(input("Item height"), "30");
+    expect(frameOf(changes, ids[0])).toMatchObject({ width: unitToPx(30, "mm"), height: unitToPx(30, "mm") });
+    expect(input("Item width").value).toBe("30");
+    expect(zoomOf(changes, ids[0])).toBe(0.886);
+    type(input("Item width"), "100");
+    type(input("Item height"), "100");
+    expect(zoomOf(changes, ids[0])).toBeUndefined();
+  });
+
   it("keeps the scale of a plot drawn larger than the smallest when it is resized", async () => {
     const { changes, ids } = await threePlots();
     const scaled = structuredClone(changes.at(-1)!);

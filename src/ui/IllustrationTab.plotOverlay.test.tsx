@@ -100,6 +100,9 @@ function fixture() {
   };
 }
 
+/** Show one plot by its tab over the preview: the preview and the Plots section then hold that plot alone. */
+const showPlot = (name: string) =>
+  act(() => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="Plots"] [role="tab"]')].find((b) => b.textContent === name)!.click());
 const populationPickers = () =>
   [...host.querySelectorAll<HTMLLabelElement>("label")].filter((l) => l.firstChild?.textContent?.trim() === "Populations").map((l) => l.querySelector("select")!);
 
@@ -108,17 +111,20 @@ describe("Illustration: a plot overlaying chosen populations", () => {
     const fx = fixture();
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Plots")!.click());
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Plot")!.click());
+    // The Plots section holds the shown plot's editor alone: Size's tab brings its picker.
+    showPlot("Size");
+    await flush();
     const pickers = populationPickers();
-    expect(pickers).toHaveLength(2);
-    expect([...pickers[1].options].map((o) => o.textContent).slice(0, 2)).toEqual([
+    expect(pickers).toHaveLength(1);
+    expect([...pickers[0].options].map((o) => o.textContent).slice(0, 2)).toEqual([
       "Each selected population in its own panel",
       "The selected populations together in one panel",
     ]);
-    expect([...pickers[1].options].pop()!.textContent).toBe("Its own list…");
+    expect([...pickers[0].options].pop()!.textContent).toBe("Its own list…");
     act(() => {
-      pickers[1].value = "__overlay__";
-      pickers[1].dispatchEvent(new Event("change", { bubbles: true }));
+      pickers[0].value = "__overlay__";
+      pickers[0].dispatchEvent(new Event("change", { bubbles: true }));
     });
     await flush();
     const figure = () => fx.props.configRef.current!.figure!;
@@ -145,7 +151,7 @@ describe("Illustration: a plot overlaying chosen populations", () => {
 
     // Back to one population drops the list.
     act(() => {
-      const picker = populationPickers()[1];
+      const picker = populationPickers()[0];
       picker.value = "";
       picker.dispatchEvent(new Event("change", { bubbles: true }));
     });
@@ -154,7 +160,7 @@ describe("Illustration: a plot overlaying chosen populations", () => {
     expect(host.querySelector('[aria-label="Populations overlaid in Size"]')).toBeNull();
   });
 
-  it("heads the row of an overlaying plot by its populations, and the other plot's row by the figure's population", async () => {
+  it("heads the row of an overlaying plot by its populations, and the other plot's row by the figure's population, each under its own tab", async () => {
     const fx = fixture();
     const figure = fx.props.configRef.current!.figure!;
     const quadrantRefs = ["Q1", "Q2", "Q3", "Q4"].map((name) => {
@@ -166,8 +172,12 @@ describe("Illustration: a plot overlaying chosen populations", () => {
     figure.columns = ["samples"];
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    const headings = [...host.querySelectorAll<HTMLElement>(".gl-figure-grid .gl-figure-row-heading")].map((th) => th.textContent);
-    expect(headings).toEqual(["All Events", "Quadrants", "Q1, Q2, Q3, Q4", "Size"]);
+    // One plot is shown at a time, so each plot's row headings are read with its tab shown.
+    const headings = () => [...host.querySelectorAll<HTMLElement>(".gl-figure-grid .gl-figure-row-heading")].map((th) => th.textContent);
+    expect(headings()).toEqual(["All Events", "Quadrants"]);
+    showPlot("Size");
+    await flush();
+    expect(headings()).toEqual(["Q1, Q2, Q3, Q4", "Size"]);
   });
 
   it("puts an overlaying panel on the Layout tab as one plot of its populations", async () => {
@@ -179,6 +189,8 @@ describe("Illustration: a plot overlaying chosen populations", () => {
     figure.plots[1] = { ...figure.plots[1], population: undefined, populations: quadrantRefs };
     const onAddToLayout = vi.fn();
     act(() => root.render(<IllustrationTab {...fx.props} onAddToLayout={onAddToLayout} />));
+    await flush();
+    showPlot("Size");
     await flush();
     const histogram = [...host.querySelectorAll<HTMLElement>("td[data-figure-panel]")].at(-1)!;
     act(() => { histogram.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 90 })); });

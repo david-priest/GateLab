@@ -7,11 +7,13 @@ import {
   type PortableAssayPlanOptions,
 } from "./workspacePortableAssays";
 import {
+  streamZipEntryByteLength,
   writeStoredZip,
-  type StreamZipEntry,
+  type AnyStreamZipEntry,
   type StreamZipWriteOptions,
   type ZipChunkSink,
 } from "./workspaceArchiveStream";
+import { createStoredAssayArchivePlan, type StoredAssayLayerSource } from "./workspaceStoredAssays";
 import {
   createOriginalSampleAssayBinding,
   migrateLegacySampleAssayBinding,
@@ -472,9 +474,11 @@ export interface PortableWorkspaceV3SampleSource {
 }
 
 export interface PortableWorkspaceV3ArchivePlan {
-  readonly entries: readonly StreamZipEntry[];
+  readonly entries: readonly AnyStreamZipEntry[];
   readonly payloadByteLength: number;
   readonly embeddedAssayCount: number;
+  /** Layers written under `stored-assays/` (workspaceStoredAssays.ts): matrices applied but not in use. */
+  readonly storedAssayCount?: number;
 }
 
 /** Build the hash-bound, self-contained v3 bundle plan without copying large FCS/assay arrays. */
@@ -483,10 +487,19 @@ export async function createPortableWorkspaceV3ArchivePlan(
   sources: readonly PortableWorkspaceV3SampleSource[],
   gatingMLXml?: string,
   options: PortableAssayPlanOptions = {},
+  /** Compensated values of matrices applied to a file and not in use, written after everything else. */
+  storedLayers: readonly StoredAssayLayerSource[] = [],
 ): Promise<PortableWorkspaceV3ArchivePlan> {
   assertPackableV3(workspace);
+  const dataPaths = new Set(workspace.samples.map(({ dataPath }) => dataPath));
+  for (const layer of storedLayers) {
+    if (!dataPaths.has(layer.dataPath)) {
+      throw new Error(`A stored compensated layer names '${layer.dataPath}', which is not a file of this workspace.`);
+    }
+  }
   const portable = await createPortableAssayArchivePlan(workspace, sources, options);
-  const entries: StreamZipEntry[] = [
+  const stored = createStoredAssayArchivePlan(storedLayers);
+  const entries: AnyStreamZipEntry[] = [
     Object.freeze({
       path: "workspace.json",
       bytes: strToU8(JSON.stringify(stampWorkspaceV3(workspace), null, 2)),
@@ -499,10 +512,12 @@ export async function createPortableWorkspaceV3ArchivePlan(
     entries.push(Object.freeze({ path: "gates.gatingml.xml", bytes: strToU8(gatingMLXml) }));
   }
   entries.push(...portable.assayFiles);
+  if (stored) entries.push(...stored.entries);
   return Object.freeze({
     entries: Object.freeze(entries),
-    payloadByteLength: entries.reduce((sum, entry) => sum + entry.bytes.byteLength, 0),
+    payloadByteLength: entries.reduce((sum, entry) => sum + streamZipEntryByteLength(entry), 0),
     embeddedAssayCount: portable.manifest.samples.filter(({ assay }) => assay !== null).length,
+    storedAssayCount: stored?.manifest.layers.length ?? 0,
   });
 }
 
@@ -514,7 +529,7 @@ export async function writePortableWorkspaceV3Archive(
 ): Promise<void> {
   // Refused before a byte is written where it would not fit: fflate writes no ZIP64, so an
   // archive past 4 GB would be corrupt and could not be reopened.
-  const size = storedZipBytes(plan.entries.map((e) => ({ path: e.path, byteLength: e.bytes.byteLength })));
+  const size = storedZipBytes(plan.entries.map((e) => ({ path: e.path, byteLength: streamZipEntryByteLength(e) })));
   if (!fitsInZip({ zipBytes: size, fileCount: plan.entries.length - 1 })) {
     throw new Error(
       `The workspace bundle comes to ${formatByteSize(size)} in ${plan.entries.length} files, more than one .zip can hold ` +

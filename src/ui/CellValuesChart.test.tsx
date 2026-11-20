@@ -105,6 +105,31 @@ const button = (text: string) => [...host.querySelectorAll<HTMLButtonElement>("b
 const radio = (name: string, index: number) => [...host.querySelectorAll<HTMLInputElement>(`input[name="${name}"]`)][index];
 const labelled = (text: string) =>
   [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.trim().startsWith(text))!.querySelector("input, select") as HTMLInputElement & HTMLSelectElement;
+/**
+ * Puts a dimension inside each panel ("x") or on a panel place through the Panels control; the
+ * dimension inside each panel has no menu, so it is moved out by choosing the other one inside.
+ */
+function place(name: string, where: string) {
+  const inside = () => [...host.querySelectorAll<HTMLInputElement>('input[name="prop-inside"]')];
+  if (where === "x") {
+    act(() => inside().find((input) => input.parentElement!.textContent === name)!.click());
+    return;
+  }
+  const menu = () => host.querySelector<HTMLSelectElement>(`select[aria-label="Place ${name}"]`);
+  if (!menu()) act(() => inside().find((input) => !input.checked)!.click());
+  act(() => {
+    const select = menu()!;
+    select.value = where;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+/** Where the Panels control has each dimension: what is inside each panel ("(fixed)" without a choice), and each panel dimension's place. */
+function placements(): Record<string, string> {
+  const checked = host.querySelector<HTMLInputElement>('input[name="prop-inside"]:checked');
+  const out: Record<string, string> = { inside: checked ? checked.parentElement!.textContent! : `${host.querySelector(".gl-prop-arrange-fixed")?.textContent} (fixed)` };
+  for (const row of host.querySelectorAll(".gl-prop-arrange-row")) out[row.querySelector("span")!.textContent!] = row.querySelector("select")!.value;
+  return out;
+}
 // A panel's title in full, as its tooltip holds it (the drawn text may be shortened).
 const panelTitles = () => [...host.querySelectorAll("#gl-prop-svg svg.gl-prop-panel")].map((svg) => svg.querySelector("text > title")?.textContent);
 
@@ -135,11 +160,7 @@ describe("Plotting tab: channel per cell", () => {
     const fx = fixture();
     mount(fx);
     chooseCells();
-    act(() => {
-      const select = host.querySelector<HTMLSelectElement>('select[aria-label="Place condition"]')!;
-      select.value = "x";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    place("condition", "x");
     expect(panelTitles()).toEqual(["Small", "Large"]);
     act(() => radio("prop-type", 1).click());
     expect(host.querySelectorAll("#gl-prop-svg path.gl-prop-mark")).toHaveLength(0);
@@ -154,11 +175,7 @@ describe("Plotting tab: channel per cell", () => {
     const option = () => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.trim() === "Colour by population")?.querySelector("input");
     // With the populations along x the marks already take their population's colour.
     expect(option()).toBeUndefined();
-    act(() => {
-      const select = host.querySelector<HTMLSelectElement>('select[aria-label="Place condition"]')!;
-      select.value = "x";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    place("condition", "x");
     const fills = () =>
       [...host.querySelectorAll("#gl-prop-svg svg.gl-prop-panel")].map((panel) => [...new Set([...panel.querySelectorAll("path.gl-prop-mark")].map((mark) => mark.getAttribute("fill")))]);
     // By group: each panel's two violins differ, and the panels repeat the same two colours.
@@ -287,42 +304,50 @@ describe("Plotting tab: panel arrangement", () => {
     // Facet by file: a panel per file and condition, D1 only in control and D2 only in treated.
     choose("Facet", "__sample__");
     // The facet and the groups are the panels' dimensions, wrapped until one is put on Columns.
-    expect([...host.querySelectorAll('[data-shelf="wrap"] .gl-figure-dimension > span')].map((s) => s.textContent)).toEqual(["Files", "condition"]);
-    choose("Place condition", "columns");
+    expect(placements()).toEqual({ inside: "Populations", Files: "wrap", condition: "wrap" });
+    place("condition", "columns");
     expect(grid()).toBe("repeat(2, max-content)");
     expect(panelTitles()).toEqual(["condition: control · File: D1.fcs", "condition: treated · File: D1.fcs", "condition: control · File: D2.fcs", "condition: treated · File: D2.fcs"]);
     expect(labelled("Per row").disabled).toBe(true);
     expect(savedPlottingState()["prop.panelColumns"]).toBe("groups");
   });
 
-  it("shows each chart's dimensions on the Arrange dimensions shelves, a stacked bar's populations fixed as its stack", () => {
+  it("shows what is inside each panel and where each panel dimension goes, says what moved along, and sums the layout up in a sentence", () => {
     const fx = fixture();
     mount(fx);
-    const shelf = (id: string) => [...host.querySelectorAll(`[data-shelf="${id}"] .gl-figure-dimension`)].map((chip) => `${chip.querySelector("span")!.textContent}${chip.querySelector("select") ? "" : " (fixed)"}`);
-    // A stacked bar: the groups along x and the populations its stack, neither moved.
-    expect(shelf("x")).toEqual(["condition (fixed)", "Stack (fixed)"]);
+    const note = () => host.querySelector(".gl-prop-arrange-note")?.textContent ?? null;
+    const summary = () => host.querySelector(".gl-prop-arrange-summary")?.textContent;
+    // A stacked bar: the groups inside each panel, fixed, and the populations its stack.
+    expect(placements()).toEqual({ inside: "condition (fixed)" });
+    expect(summary()).toBe("One panel; in each panel, a bar per condition, its populations stacked.");
     choose("Facet", "__sample__");
-    expect(shelf("wrap")).toEqual(["Files"]);
-    choose("Place Files", "columns");
-    expect(shelf("columns")).toEqual(["Files"]);
+    expect(placements()).toEqual({ inside: "condition (fixed)", Files: "wrap" });
+    place("Files", "columns");
+    expect(placements()).toEqual({ inside: "condition (fixed)", Files: "columns" });
     expect(savedPlottingState()["prop.panelColumns"]).toBe("facet");
     expect(grid()).toBe("repeat(2, max-content)");
-    // A proportion boxplot: a panel per population, which may take the columns; the groups stay along x.
+    expect(note()).toBeNull();
+    expect(summary()).toBe("A column per file; in each panel, a bar per condition, its populations stacked.");
+    // A proportion boxplot: a panel per population, which may take the columns; the groups stay inside.
     act(() => radio("prop-type", 1).click());
-    expect(shelf("x")).toEqual(["condition (fixed)"]);
-    expect(shelf("wrap")).toEqual(["Populations"]);
-    expect([...host.querySelectorAll<HTMLOptionElement>('select[aria-label="Place Populations"] option')].map((o) => `${o.value}${o.disabled ? " (off)" : ""}`)).toEqual(["x (off)", "columns", "rows", "pages", "wrap"]);
-    choose("Place Populations", "columns");
-    expect(shelf("columns")).toEqual(["Populations"]);
-    expect(shelf("wrap")).toEqual(["Files"]);
+    expect(placements()).toEqual({ inside: "condition (fixed)", Files: "columns", Populations: "wrap" });
+    expect([...host.querySelectorAll<HTMLOptionElement>('select[aria-label="Place Populations"] option')].map((o) => `${o.textContent}${o.disabled ? " (off)" : ""}`)).toEqual(["In columns", "In rows", "Wrapped", "On pages"]);
+    place("Populations", "columns");
+    // Columns hold one dimension: the files leave them, and the control says so.
+    expect(placements()).toEqual({ inside: "condition (fixed)", Files: "wrap", Populations: "columns" });
+    expect(note()).toBe("Files moved to the wrapped panels.");
     expect(savedPlottingState()["prop.panelColumns"]).toBe("populations");
-    // A per-cell chart: the populations along x by default; put on Columns, the groups come along x.
+    expect(summary()).toBe("A column per population and the panels for each file down the rows; in each panel, a box per condition.");
+    // A per-cell chart: the populations or the groups inside each panel, by choice.
     chooseCells();
-    expect(shelf("x")).toEqual(["Populations"]);
-    choose("Place Populations", "columns");
-    expect(shelf("x")).toEqual(["condition"]);
+    expect(placements()).toEqual({ inside: "Populations", Files: "wrap", condition: "wrap" });
+    place("condition", "x");
+    // The populations leave the panel for the columns they were given above, and the control says so.
+    expect(placements()).toEqual({ inside: "condition", Files: "wrap", Populations: "columns" });
+    expect(note()).toBe("Populations moved to the columns.");
     expect(savedPlottingState()["prop.xAxis"]).toBe("groups");
     expect(panelTitles()).toEqual(["Small · File: D1.fcs", "Large · File: D1.fcs", "Small · File: D2.fcs", "Large · File: D2.fcs"]);
+    expect(summary()).toBe("A column per population and the panels for each file down the rows; in each panel, a box per condition.");
   });
 
   it("makes a grid by rows and columns, headed above each column and beside each row, kept on a reload, exported, and framed on the Layout tab", () => {
@@ -330,8 +355,8 @@ describe("Plotting tab: panel arrangement", () => {
     mount(fx);
     chooseCells();
     choose("Facet", "__sample__");
-    choose("Place Populations", "columns");
-    choose("Place Files", "rows");
+    place("Populations", "columns");
+    place("Files", "rows");
     expect(savedPlottingState()).toMatchObject({ "prop.xAxis": "groups", "prop.panelColumns": "populations", "prop.panelRows": "facet" });
     // A heading column, then a column per population; a heading row, then a row per file.
     expect(grid()).toBe("max-content repeat(2, max-content)");
@@ -380,8 +405,8 @@ describe("Plotting tab: panel arrangement", () => {
     mount(fx);
     act(() => radio("prop-type", 1).click());
     choose("Facet", "__sample__");
-    choose("Place Populations", "rows");
-    choose("Place Files", "columns");
+    place("Populations", "rows");
+    place("Files", "columns");
     const headings = (side: string) => [...host.querySelectorAll(`#gl-prop-svg svg.gl-prop-heading[data-heading="${side}"] title`)].map((t) => t.textContent);
     expect(headings("column")).toEqual(["File: D1.fcs", "File: D2.fcs"]);
     expect(headings("row")).toEqual(["Small", "Large", "ungated"]);
@@ -389,7 +414,7 @@ describe("Plotting tab: panel arrangement", () => {
     const titles = [...host.querySelectorAll("#gl-prop-svg svg.gl-prop-panel")].map((svg) => svg.querySelector("text")?.textContent);
     expect(titles.every((title) => title === "")).toBe(true);
     act(() => radio("prop-value", 2).click());
-    choose("Place Populations", "rows");
+    place("Populations", "rows");
     expect(headings("row")).toEqual(["Small", "Large"]);
     expect(headings("column")).toEqual(["File: D1.fcs", "File: D2.fcs"]);
   });
@@ -489,12 +514,7 @@ describe("Plotting tab: a block per panel on the Layout tab", () => {
 
 describe("Plotting tab: split violin and ridgelines", () => {
   const typeRadio = (label: string) => [...host.querySelectorAll<HTMLInputElement>('input[name="prop-type"]')].find((input) => input.parentElement!.textContent === label)!;
-  const setAlongX = (value: "populations" | "groups") =>
-    act(() => {
-      const select = host.querySelector<HTMLSelectElement>(`select[aria-label="Place ${value === "groups" ? "condition" : "Populations"}"]`)!;
-      select.value = "x";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+  const setAlongX = (value: "populations" | "groups") => place(value === "groups" ? "condition" : "Populations", "x");
 
   it("offers the split violin only with the two groups along x, says why not otherwise, and draws a split violin per population", () => {
     const fx = fixture();
@@ -633,9 +653,9 @@ describe("Plotting tab: pages", () => {
     mount(fx, { onAddToLayout, onAddPanelsToLayout });
     chooseCells();
     choose("Facet", "__sample__");
-    choose("Place Files", "pages");
+    place("Files", "pages");
     expect(savedPlottingState()["prop.pageBy"]).toBe("facet");
-    expect([...host.querySelectorAll('[data-shelf="pages"] .gl-figure-dimension > span')].map((s) => s.textContent)).toEqual(["Files"]);
+    expect(placements().Files).toBe("pages");
     // The first page: D1's panels, a panel per condition.
     expect(pager()).toBe("Page 1 of 2 · File: D1.fcs");
     expect(panelTitles()).toEqual(["condition: control · File: D1.fcs", "condition: treated · File: D1.fcs"]);
@@ -703,13 +723,7 @@ describe("Plotting tab: a block per panel of a grid by rows and columns", () => 
       select.value = "__sample__";
       select.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    for (const [chip, shelf] of [["Populations", "columns"], ["Files", "rows"]]) {
-      act(() => {
-        const select = host.querySelector<HTMLSelectElement>(`select[aria-label="Place ${chip}"]`)!;
-        select.value = shelf;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-    }
+    for (const [chip, shelf] of [["Populations", "columns"], ["Files", "rows"]]) place(chip, shelf);
     act(() => button("Add panels to Layout")!.click());
     const [settings, blocks] = onAddPanelsToLayout.mock.calls[0] as [ProportionsSettings, { panel: Record<string, string>; row: number; column: number }[]];
     expect(settings.panelRows).toBe("facet");
@@ -768,12 +782,6 @@ describe("Plotting tab: several channels", () => {
     });
     return { ...fx, samples };
   }
-  const choose = (label: string, value: string) =>
-    act(() => {
-      const select = host.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;
-      select.value = value;
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
   const tick = (label: string) => act(() => [...host.querySelectorAll<HTMLLabelElement>(".gl-prop-channels label")].find((l) => l.textContent === label)!.querySelector("input")!.click());
   const axisTitles = (id = "gl-prop-svg") => [...host.querySelectorAll(`#${id} svg.gl-prop-panel`)].map((svg) => [...svg.querySelectorAll("text")].map((t) => t.textContent).find((text) => text === "FSC-A" || text === "SSC-A"));
   const surface = (fx: ReturnType<typeof fixture>, settings: ProportionsSettings, panel: unknown, id: string) => (
@@ -815,11 +823,11 @@ describe("Plotting tab: several channels", () => {
       "Small · treated: 2 cells from 1 file, median 300",
       "Large · treated: 2 cells from 1 file, median 500",
     ]);
-    // "Channels" is a chip that goes on a panel shelf, never along x.
-    expect([...host.querySelectorAll<HTMLOptionElement>('select[aria-label="Place Channels"] option')].map((o) => `${o.value}${o.disabled ? " (off)" : ""}`)).toEqual(["x (off)", "columns", "rows", "pages", "wrap"]);
-    expect(host.textContent).toContain("they do not run along x");
-    choose("Place Channels", "columns");
-    choose("Place condition", "rows");
+    // The channels are a panel dimension, never inside a panel.
+    expect([...host.querySelectorAll<HTMLOptionElement>('select[aria-label="Place Channels"] option')].map((o) => o.value)).toEqual(["columns", "rows", "wrap", "pages"]);
+    expect([...host.querySelectorAll('input[name="prop-inside"]')].map((input) => input.parentElement!.textContent)).toEqual(["Populations", "condition"]);
+    place("Channels", "columns");
+    place("condition", "rows");
     expect(host.querySelector<HTMLDivElement>("#gl-prop-svg .gl-prop-panels")!.style.gridTemplateColumns).toBe("max-content repeat(2, max-content)");
     expect([...host.querySelectorAll('#gl-prop-svg svg.gl-prop-heading[data-heading="column"] title')].map((t) => t.textContent)).toEqual(["FSC-A", "SSC-A"]);
 
@@ -867,13 +875,13 @@ describe("Plotting tab: several channels", () => {
     mount(fx);
     chooseCells();
     tick("SSC-A");
-    choose("Place Channels", "pages");
+    place("Channels", "pages");
     expect(host.querySelector(".gl-prop-pager span")?.textContent).toBe("Page 1 of 2 · FSC-A");
     expect(axisTitles()).toEqual(["FSC-A", "FSC-A"]);
     act(() => button("Next")!.click());
     expect(axisTitles()).toEqual(["SSC-A", "SSC-A"]);
     // A statistic of each file's cells: a panel per group for each channel, each on its own axis.
-    choose("Place Channels", "wrap");
+    place("Channels", "wrap");
     act(() => radio("prop-value", 2).click());
     const titles = [...host.querySelectorAll("#gl-prop-svg svg.gl-prop-panel")].map((svg) => [...svg.querySelectorAll("text > title")].map((t) => t.textContent));
     expect(titles.map((texts) => texts.find((text) => text?.startsWith("Median")))).toEqual(["Median FSC-A", "Median FSC-A", "Median SSC-A", "Median SSC-A"]);

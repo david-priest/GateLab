@@ -206,12 +206,9 @@ describe("Populations side by side in one panel: the Plotting tab", () => {
       ),
     );
   const option = (text: string) => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.trim() === text)?.querySelector("input");
+  // The groups inside each panel: chosen in the Panels control.
   const groupsAlongX = () =>
-    act(() => {
-      const select = host.querySelector<HTMLSelectElement>('select[aria-label="Place condition"]')!;
-      select.value = "x";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    act(() => [...host.querySelectorAll<HTMLInputElement>('input[name="prop-inside"]')].find((input) => input.parentElement!.textContent === "condition")!.click());
 
   it("shows the checkbox with the groups along x, draws one panel, ticks and disables Colour by population, and keeps the choice", () => {
     mount(tabFixture());

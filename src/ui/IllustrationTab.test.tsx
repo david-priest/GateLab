@@ -532,7 +532,7 @@ describe("IllustrationTab", () => {
     const props = fixture();
     act(() => root.render(<IllustrationTab {...props} />));
     await flush();
-    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Plots")!.click());
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Plot")!.click());
     const trigger = host.querySelector<HTMLButtonElement>('button[aria-label="X channel"]')!;
     expect(trigger).not.toBeNull();
     expect(trigger.textContent).toBe("FSC-A");
@@ -563,8 +563,8 @@ describe("IllustrationTab", () => {
     expect(onFitChannels).toHaveBeenCalledWith(["FSC-A", "SSC-A"]);
     expect(props.configRef.current!.figure!.scalePolicy).toBe("gating");
     act(() => button("Export").click());
-    // In the header row, right-aligned, as on the Strategy and Plotting tabs.
-    expect([...host.querySelectorAll("header.gl-figure-toolbar .gl-plotting-head-actions button")].map((b) => b.textContent)).toEqual(["Add panels to Layout"]);
+    // Under Export, with the figure's other ways out.
+    expect([...host.querySelectorAll("#figure-section-export .gl-figure-layout-actions button")].map((b) => b.textContent)).toEqual(["Add panels to Layout"]);
     act(() => button("Add panels to Layout").click());
     expect(onAddToLayout).toHaveBeenCalledTimes(1);
     const recipes = onAddToLayout.mock.calls[0][0];

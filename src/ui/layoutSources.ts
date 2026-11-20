@@ -24,6 +24,55 @@ import { proportionPanelTests } from "./ProportionsChart";
 import { columnValueOrder } from "../engine/levelOrder";
 import { cellPanels, cellReplicateFrame } from "./CellValuesChart";
 import { chartXAxis } from "./chart/chartXAxis";
+import type { StoredHierarchy } from "../engine/hierarchies";
+import { computePooledGatingStrategy, computePooledMultiPopStrategy, type StrategyMember, type StrategyLeftOut } from "../engine/pooledStrategy";
+
+/** The requested strategy files, reference first, with the target followed into each tree. */
+export function strategyPoolMembers(
+  recipe: LayoutStrategyRecipe,
+  samples: readonly ChartSource[],
+  trees: Record<string, StoredHierarchy>,
+  templateTreeId?: string,
+): StrategyMember[] {
+  const ids = recipe.pool?.sampleIds ?? [recipe.sampleId];
+  const ordered = ids.includes(recipe.sampleId) ? [recipe.sampleId, ...ids.filter((id) => id !== recipe.sampleId)] : ids;
+  return ordered.flatMap((id) => {
+    const view = samples.find((candidate) => candidate.id === id);
+    if (!view) return [];
+    const resolved = resolvePopulationInTree(recipe.populationId, view.tree, trees, templateTreeId);
+    return [{ id: view.id, name: view.name, sample: view.sample, tree: view.tree, gating: view.derived, populationId: resolved.missing ? "" : resolved.id }];
+  });
+}
+
+type StrategyPoolDescription = { drawn: StrategyMember[]; leftOut: StrategyLeftOut[] };
+const strategyPoolDescriptions = new WeakMap<readonly ChartSource[], Map<string, { signature: string; drawnIds: Set<string>; leftOut: StrategyLeftOut[] }>>();
+
+/** Use the drawing's eligibility rules once per prepared pool; labels need only one sampled point. */
+export function drawnStrategyPool(
+  recipe: LayoutStrategyRecipe,
+  samples: readonly ChartSource[],
+  trees: Record<string, StoredHierarchy>,
+  templateTreeId?: string,
+): StrategyPoolDescription {
+  const members = strategyPoolMembers(recipe, samples, trees, templateTreeId);
+  // Selection and styling do not change eligibility. Retain no event masks, and invalidate for
+  // a changed assay, prepared membership, gate geometry, population path or lineage.
+  const key = JSON.stringify([recipe.sampleId, recipe.populationId, recipe.populationIds, recipe.fullPath, recipe.pool, templateTreeId]);
+  const signature = JSON.stringify([
+    members.map((member) => [member.id, member.populationId, member.sample.dataRevision, member.sample.activeLayer, member.sample.channels]),
+    Object.values(trees).map((tree) => [tree.id, tree.gates, tree.gate_order, tree.populations, tree.root_population_id, tree.source_hierarchy_id, tree.source_gate_ids, tree.source_population_ids]),
+  ]);
+  let cache = strategyPoolDescriptions.get(samples);
+  if (!cache) strategyPoolDescriptions.set(samples, (cache = new Map()));
+  const hit = cache.get(key);
+  if (hit?.signature === signature) return { drawn: members.filter((member) => hit.drawnIds.has(member.id)), leftOut: hit.leftOut };
+  const computed = recipe.populationIds?.length
+    ? computePooledMultiPopStrategy(members, recipe.populationIds, templateTreeId ?? members[0]?.tree.id ?? "", trees, { maxEvents: 1, globalScales: {} })
+    : computePooledGatingStrategy(members, trees, { fullPath: recipe.fullPath, maxEvents: 1 });
+  // Replace the latest signature for this recipe; cached ids never keep old gated masks alive.
+  cache.set(key, { signature, drawnIds: new Set(computed.drawn.map((member) => member.id)), leftOut: computed.leftOut });
+  return { drawn: computed.drawn, leftOut: computed.leftOut };
+}
 
 /** A group of a chart and how many replicate units (or cells, or files) it holds, per population where the chart has several. */
 export interface SourceGroup {
@@ -185,27 +234,29 @@ function strategySource(item: SourceItem, recipe: LayoutStrategyRecipe, ctx: Blo
   const trees = figureHierarchies(ctx.state);
   const templateTreeId = item.templateSampleId && item.templateSampleId !== recipe.sampleId ? ctx.samples.find((entry) => entry.id === item.templateSampleId)?.tree.id : undefined;
   const asked = recipe.populationIds?.length ? recipe.populationIds : [recipe.populationId];
-  // A pooled strategy counts each population over the pooled files.
+  // A pooled strategy counts each population over the files the drawing actually admits.
   const pool = recipe.pool && recipe.pool.sampleIds.length > 1 ? recipe.pool.sampleIds : null;
-  const pooledViews = (pool ?? []).flatMap((id) => ctx.samples.filter((entry) => entry.id === id));
+  const pooled = pool ? drawnStrategyPool(recipe, ctx.samples, trees, templateTreeId) : null;
   const found = view
     ? asked.flatMap((id) => {
         const resolved = resolvePopulationInTree(id, view.tree, trees, templateTreeId);
         const population = resolved.missing ? undefined : view.tree.populations[resolved.id];
-        const count = pool
-          ? pooledViews.reduce((total, entry) => {
+        const count = pooled
+          ? pooled.drawn.reduce((total, entry) => {
               const inFile = resolvePopulationInTree(id, entry.tree, trees, templateTreeId);
-              return total + (inFile.missing ? 0 : entry.derived.stats.event_count[inFile.id] ?? 0);
+              return total + (inFile.missing ? 0 : entry.gating.stats.event_count[inFile.id] ?? 0);
             }, 0)
           : view.derived.stats.event_count[resolved.id] ?? 0;
         return population ? [{ name: population.name, count }] : [];
       })
     : [];
   const file = name(recipe.sampleId);
+  const poolName = pooled && pool ? `${pooled.drawn.length === pool.length ? pool.length : `${pooled.drawn.length} of ${pool.length}`} files pooled` : file;
+  const leftOut = pooled?.leftOut.length ? `; not pooled: ${pooled.leftOut.map((entry) => `${entry.name} (${entry.reason})`).join(", ")}` : "";
   return {
     kind: "strategy",
-    shows: `Gating steps leading to ${listWords(found.map((entry) => entry.name)) || "the population"} in ${pool ? `${pool.length} files pooled` : file}`,
-    files: pool ? pool.map(name) : [file],
+    shows: `Gating steps leading to ${listWords(found.map((entry) => entry.name)) || "the population"} in ${poolName}${leftOut}`,
+    files: pooled ? pooled.drawn.map((entry) => name(entry.id)) : [file],
     populations: found.map((entry) => entry.name),
     channels: [],
     counts: found.map((entry) => entry.count),

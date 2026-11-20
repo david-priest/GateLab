@@ -37,10 +37,13 @@ export function FigureHeatmap({
   matrix,
   config,
   cellSize,
+  svgClassName,
 }: {
   matrix: HeatmapMatrix;
   config: IllustrationConfig;
   cellSize: number;
+  /** A class on the drawn SVG, for an export that collects its chart's SVGs by class (the Plotting tab's). */
+  svgClassName?: string;
 }) {
   const gradientId = useId().replace(/:/g, "");
   const fontLabel = config.fontAxis || 12;
@@ -86,7 +89,7 @@ export function FigureHeatmap({
       data-render-family="illustration"
       data-plot-key="heatmap"
     >
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: "block", fontFamily: "Arial, Helvetica, sans-serif" }}>
+      <svg className={svgClassName} width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: "block", fontFamily: "Arial, Helvetica, sans-serif" }}>
         <rect width={width} height={height} fill="#ffffff" />
         <defs>
           <linearGradient id={gradientId} x1="0%" x2="0%" y1="100%" y2="0%">
@@ -133,7 +136,7 @@ export function FigureHeatmap({
               if (matrix.scale !== "none" && scaled !== null) lines.push(`scaled: ${formatValue(scaled)}`);
               lines.push(`events: ${row.count.toLocaleString()}`);
               return (
-                <g key={`${row.key}|${column.plotId}`}>
+                <g key={`${row.key}|${column.key}`}>
                   <rect x={x} y={y} width={cellSize} height={cellSize} fill={colour ? colour.colour : "#e5e7eb"} stroke="#ffffff" strokeWidth={1} />
                   <title>{lines.join("\n")}</title>
                   {showValues && raw !== null && (
@@ -172,7 +175,7 @@ export function FigureHeatmap({
             const x = left + (c + 0.5) * cellSize;
             const y = top + matrixHeight + 6;
             return (
-              <text key={column.plotId} x={x} y={y} textAnchor="end" dominantBaseline="hanging" transform={`rotate(-45 ${x} ${y})`}>
+              <text key={column.key} x={x} y={y} textAnchor="end" dominantBaseline="hanging" transform={`rotate(-45 ${x} ${y})`}>
                 {column.label}
               </text>
             );

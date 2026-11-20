@@ -972,7 +972,7 @@ describe("CompensationTab common path", () => {
     expect(cell.classList.contains("selected")).toBe(false);
   });
 
-  it("draws the matrix cells as large as the free space allows, up to a cap, and never smaller than before", () => {
+  it("fits the matrix cells to the free space, up to a cap, and holds a size the user chooses", () => {
     const cellWidth = () => /repeat\(\d+, (\d+)px\)/.exec(host.querySelector<HTMLElement>(".gl-comp-matrix")!.style.gridTemplateColumns)?.[1];
     // Ten channels drew at 38 px before, whatever the room.
     renderTab(flowSample({ channelCount: 10 }));
@@ -1006,9 +1006,28 @@ describe("CompensationTab common path", () => {
     resize(700, 560);
     expect(Number(cellWidth())).toBeGreaterThan(38);
     expect(Number(cellWidth())).toBeLessThan(44);
-    // A small window scrolls, as before, rather than drawing cells too small to read.
+    // A small window fits the whole matrix too; cells too small for their values show colour alone.
     resize(400, 300);
-    expect(cellWidth()).toBe("38");
+    const fitted = Number(cellWidth());
+    expect(fitted).toBeLessThan(30);
+    expect(fitted).toBeGreaterThanOrEqual(12);
+    const stage = () => host.querySelector<HTMLElement>(".gl-comp-matrix-stage")!;
+    expect(stage().classList.contains("is-values-hidden")).toBe(true);
+    // A size chosen with the control holds whatever the room, and the panel scrolls.
+    const slider = host.querySelector<HTMLInputElement>('.gl-comp-matrix-size input[type="range"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(slider, "50");
+      slider.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(cellWidth()).toBe("50");
+    expect(stage().classList.contains("is-values-hidden")).toBe(false);
+    resize(1600, 1000);
+    expect(cellWidth()).toBe("50");
+    const fit = [...host.querySelectorAll<HTMLButtonElement>(".gl-comp-matrix-size button")].find((button) => button.textContent === "Fit")!;
+    expect(fit.getAttribute("aria-pressed")).toBe("false");
+    act(() => fit.click());
+    expect(fit.getAttribute("aria-pressed")).toBe("true");
+    expect(cellWidth()).toBe("44");
   });
 
   it("keeps the left column's explanations behind its ? hints, in side tabs as the other panes have", () => {
@@ -1449,6 +1468,7 @@ describe("CompensationTab CyTOF import path", () => {
     expect(workspaceTabs.map((button) => button.textContent?.trim())).toEqual([
       "Matrix",
       "Global inspector",
+      "Check",
       "Flagged",
     ]);
     act(() => globalTab.click());
@@ -1647,26 +1667,18 @@ describe("CompensationTab CyTOF import path", () => {
     expect(host.querySelector(".gl-comp-attention-section")?.textContent).toContain("Flagged by you (1)");
     const flaggedColumns = host.querySelector(".gl-comp-flagged-columns")!;
     expect(flaggedColumns).not.toBeNull();
-    expect(flaggedColumns.querySelectorAll(":scope > .gl-comp-attention-section")).toHaveLength(2);
+    // A mass-cytometry matrix is read against the events in Check: Flagged holds the pairs the
+    // user flagged, without the residual-evidence suggestions or their scope controls.
+    expect(flaggedColumns.querySelectorAll(":scope > .gl-comp-attention-section")).toHaveLength(1);
     expect(flaggedColumns.children[0]?.textContent).toContain("Flagged by you");
-    expect(flaggedColumns.children[1]?.textContent).toContain("Conservative suggestions");
+    expect(host.textContent).not.toContain("Conservative suggestions");
+    expect(host.querySelector('select[aria-label="Compensation evidence mode"]')).toBeNull();
+    expect(host.textContent).toContain("Every pair is read against the events in Check");
     expect(host.querySelectorAll('select[aria-label="Compensation sweep workers"] option')).toHaveLength(4);
-    const evidenceMode = host.querySelector<HTMLSelectElement>('select[aria-label="Compensation evidence mode"]')!;
-    expect(evidenceMode.value).toBe("biological");
-    expect(host.textContent).toContain("Broad positive association is excluded");
-    act(() => {
-      evidenceMode.value = "control";
-      evidenceMode.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    expect(host.textContent).toContain("Control-data suggestions");
-    act(() => {
-      evidenceMode.value = "biological";
-      evidenceMode.dispatchEvent(new Event("change", { bubbles: true }));
-    });
     expect(host.querySelector('button[aria-label="Follow-up source channel"]')).not.toBeNull();
     expect(host.querySelector('input[aria-label="Compensation biplot point size"]')).not.toBeNull();
     expect([...host.querySelectorAll<HTMLButtonElement>("button")]
-      .some((button) => button.textContent === "Recompute suggestions")).toBe(true);
+      .some((button) => button.textContent === "Recompute suggestions")).toBe(false);
     expect(host.textContent).toContain("Sweep workers are separate from full-Apply workers");
     expect(host.textContent).toContain("Four exact candidates will be interpolated");
     const nextFlagged = host.querySelector<HTMLButtonElement>('button[aria-label="Next flagged compensation pair"]')!;
@@ -1674,12 +1686,6 @@ describe("CompensationTab CyTOF import path", () => {
     expect(nextFlagged.disabled).toBe(false);
     expect(previousFlagged.disabled).toBe(false);
     expect(host.querySelector(".gl-comp-flag-navigation")?.textContent).toContain("1 / 1 flagged");
-
-    const recompute = [...host.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent === "Recompute suggestions")!;
-    act(() => recompute.click());
-    expect(host.textContent).toContain("1 flagged pair was retained");
-    expect(host.querySelector<HTMLInputElement>(".gl-comp-followup-toggle input")?.checked).toBe(true);
 
     const previewBounds = [...host.querySelectorAll<HTMLButtonElement>("button")]
       .find((button) => button.textContent === "Preview endpoints")!;

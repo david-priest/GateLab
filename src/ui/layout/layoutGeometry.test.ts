@@ -8,6 +8,7 @@ import {
   cloneLayoutWorkspace,
   createLayoutSheet,
   defaultLayoutPage,
+  normalizeLayoutWorkspace,
   pageForPreset,
   pageSizeMm,
   pageSizePx,
@@ -88,10 +89,20 @@ describe("the proportions lock on typed values", () => {
     expect(framePatch(item, "width", 300, true)).toEqual({ width: 300, height: 150 });
     expect(framePatch(item, "height", 160, true)).toEqual({ width: 320, height: 160 });
   });
-  it("keeps each side at the item's minimum", () => {
-    // A biplot is at least 140 × 140 px.
-    expect(framePatch(item, "width", 200, true)).toEqual({ width: 200, height: 140 });
-    expect(framePatch(item, "width", 20, false)).toEqual({ width: 140 });
+  it("keeps each side at the item's minimum, which a biplot does not have: it is shown scaled instead", () => {
+    // A chart is at least 160 × 120 px.
+    const chart = { ...item, recipe: { kind: "chart" } } as unknown as LayoutItem;
+    expect(framePatch(chart, "width", 200, true)).toEqual({ width: 200, height: 120 });
+    expect(framePatch(chart, "width", 20, false)).toEqual({ width: 160 });
+    expect(framePatch(item, "width", 200, true)).toEqual({ width: 200, height: 100 });
+    expect(framePatch(item, "width", unitToPx(30, "mm"), false)).toEqual({ width: unitToPx(30, "mm") });
+  });
+
+  it("keeps a biplot's frame below its drawn size, and its scale, through a save and reopen", () => {
+    const small = plot("A", 10, 10, unitToPx(30, "mm"), unitToPx(30, "mm"), { zoom: 0.886 });
+    const sheet = sheetOf([small]);
+    const saved = normalizeLayoutWorkspace(JSON.parse(JSON.stringify({ version: 2, activeSheetId: sheet.id, sheets: [sheet] })));
+    expect(saved.sheets[0].items[0]).toMatchObject({ width: unitToPx(30, "mm"), height: unitToPx(30, "mm"), zoom: 0.886 });
   });
 });
 

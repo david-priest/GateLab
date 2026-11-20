@@ -12,7 +12,7 @@ import { coreReducer, initialCoreState, type CoreState } from "../store";
 import { DEFAULT_HIERARCHY_ID } from "../engine/hierarchies";
 import { Sample } from "../engine/sample";
 import type { FcsFile } from "../engine/fcs";
-import { BASE_PROPORTIONS_SETTINGS, type ProportionsSettings } from "../engine/proportionsSettings";
+import { BASE_PROPORTIONS_SETTINGS, DEFAULT_RIDGELINE_STYLE, type ProportionsSettings, type RidgelineStyle } from "../engine/proportionsSettings";
 import type { ProportionsSampleRef } from "../engine/proportionsModel";
 import { buildCellValuesModel, cellValueAxis, violinOutline } from "../engine/cellValuesModel";
 import { paletteColors } from "../engine/palettes";
@@ -23,6 +23,7 @@ import {
   halfViolinPath,
   ridgelineRows,
   splitsViolins,
+  UNLABELLED_RIDGE_LEFT,
   type CellPlotType,
   type CellReplicates,
 } from "./CellValuesChart";
@@ -113,7 +114,7 @@ const FONTS = { tick: 9, axis: 10, legend: 11 };
 function draw(
   fx: ReturnType<typeof fixture>,
   plotType: CellPlotType,
-  extra: { xAxis?: "populations" | "groups"; violinBox?: boolean; showN?: boolean; replicates?: CellReplicates; axis?: ChartAxisFrame } = {},
+  extra: { xAxis?: "populations" | "groups"; violinBox?: boolean; showN?: boolean; replicates?: CellReplicates; axis?: ChartAxisFrame; ridgeline?: RidgelineStyle } = {},
 ) {
   act(() =>
     root.render(
@@ -130,6 +131,7 @@ function draw(
         appearance={{ height: HEIGHT, showGrid: true, showLegend: true }}
         groupTitle="condition"
         replicates={extra.replicates}
+        ridgeline={extra.ridgeline}
       />,
     ),
   );
@@ -302,5 +304,76 @@ describe("Per-cell chart: ridgelines", () => {
     draw(fx, "ridgeline", { axis: limited });
     expect(host.querySelectorAll("clipPath")).toHaveLength(2);
     expect(host.querySelector("g.gl-prop-plot-clip path.gl-prop-mark")).not.toBeNull();
+  });
+});
+
+describe("Per-cell chart: ridgeline style", () => {
+  const ridgeTitles = (svg: Element) => [...svg.querySelectorAll("path.gl-prop-mark title")].map((title) => title.textContent!.split(", median")[0]);
+
+  it("spaces the rows by the overlap set, and every ridge still holds the gate's count", () => {
+    const fx = fixture();
+    const plain = draw(fx, "ridgeline").panel("CD4 SP");
+    // CD4 SP: control F1 3 + F2 1 + F3 2 cells, treated F4 3 + F5 2, as the quadrant gate counts them.
+    const counted = ["CD4 SP · control: 6 cells from 3 files", "CD4 SP · treated: 5 cells from 2 files"];
+    expect(ridgeTitles(plain)).toEqual(counted);
+    const svg = draw(fx, "ridgeline", { ridgeline: { ...DEFAULT_RIDGELINE_STYLE, overlap: 0 } }).panel("CD4 SP");
+    expect(ridgeTitles(svg)).toEqual(counted);
+    const top = cellChartLayout("ridgeline", ["control", "treated"], [], FONTS, HEIGHT, 6, 0, [], false).margin.top;
+    const { baselines } = ridgelineRows(2, top, HEIGHT, 0);
+    const [control, treated] = [...svg.querySelectorAll("path.gl-prop-mark")].map((path) => points(path.getAttribute("d")!));
+    expect(control[0][1]).toBeCloseTo(baselines[0], 2);
+    expect(treated[0][1]).toBeCloseTo(baselines[1], 2);
+    // With no overlap, each ridge is half the plot's height and the first ends where the second begins.
+    expect(baselines[1] - baselines[0]).toBeCloseTo(HEIGHT / 2, 6);
+  });
+
+  it("draws the fill at its opacity, or none, and the outline in the ridge's colour, in black, or not at all", () => {
+    const fx = fixture();
+    const marks = (style: Partial<RidgelineStyle>) => {
+      const svg = draw(fx, "ridgeline", { ridgeline: { ...DEFAULT_RIDGELINE_STYLE, ...style } }).panel("CD4 SP");
+      const group = svg.querySelector("g.gl-prop-mark-group")!;
+      const area = group.querySelector("path.gl-prop-mark")!;
+      const outline = group.querySelector("path:not(.gl-prop-mark)");
+      return { area, outline };
+    };
+    const plain = marks({});
+    expect(plain.area.getAttribute("fill-opacity")).toBe("0.85");
+    expect(plain.outline!.getAttribute("stroke")).toBe(plain.area.getAttribute("fill"));
+    expect(plain.outline!.getAttribute("stroke-width")).toBe("1");
+    const faint = marks({ fillOpacity: 0.3, outline: "black", outlineWidth: 2 });
+    expect(faint.area.getAttribute("fill-opacity")).toBe("0.3");
+    expect(faint.outline!.getAttribute("stroke")).toBe("#111827");
+    expect(faint.outline!.getAttribute("stroke-width")).toBe("2");
+    // No fill: the area stays, transparent, for its tooltip.
+    const hollow = marks({ fill: false });
+    expect(hollow.area.getAttribute("fill-opacity")).toBe("0");
+    expect(hollow.area.querySelector("title")).not.toBeNull();
+    expect(hollow.outline).not.toBeNull();
+    const bare = marks({ outline: "none" });
+    expect(bare.outline).toBeNull();
+    expect(bare.area.getAttribute("fill-opacity")).toBe("0.85");
+  });
+
+  it("labels the rows beside the first panel of a row only, the panels further along narrower by the labels' margin", () => {
+    const fx = fixture();
+    // The groups within each panel, a panel per population, both in one row.
+    const every = draw(fx, "ridgeline");
+    const rowLabels = (svg: Element) => [...svg.querySelectorAll("text")].filter((text) => text.getAttribute("text-anchor") === "end").map((text) => text.querySelector("title")?.textContent);
+    expect(every.panels).toHaveLength(2);
+    expect(every.panels.map(rowLabels)).toEqual([["control", "treated"], ["control", "treated"]]);
+    const fullWidth = Number(every.panels[1].getAttribute("width"));
+    // Read before drawing again: React redraws into the same elements.
+    const xs = (svg: Element) => [...svg.querySelectorAll("path.gl-prop-mark")].flatMap((path) => points(path.getAttribute("d")!).map(([x]) => x));
+    const everyXs = xs(every.panels[1]);
+    const everyTitles = ridgeTitles(every.panels[1]);
+    const left = cellChartLayout("ridgeline", ["control", "treated"], [], FONTS, HEIGHT, 6, 0, [], false).margin.left;
+    const first = draw(fx, "ridgeline", { ridgeline: { ...DEFAULT_RIDGELINE_STYLE, labels: "first" } });
+    expect(first.panels.map(rowLabels)).toEqual([["control", "treated"], []]);
+    expect(Number(first.panels[0].getAttribute("width"))).toBe(fullWidth);
+    expect(Number(first.panels[1].getAttribute("width"))).toBeCloseTo(fullWidth - (left - UNLABELLED_RIDGE_LEFT), 6);
+    // The ridges keep their counts, and the plot its width, starting at the narrower margin.
+    expect(ridgeTitles(first.panels[1])).toEqual(everyTitles);
+    const shift = left - UNLABELLED_RIDGE_LEFT;
+    expect(xs(first.panels[1]).map((x) => x + shift)).toEqual(everyXs.map((x) => expect.closeTo(x, 1)));
   });
 });

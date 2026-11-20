@@ -64,7 +64,6 @@
   outline: 2px solid #2469c7;
   outline-offset: 2px;
 }
-.gl-figure-toolbar,
 .gl-figure-viewbar,
 .gl-figure-arrangement,
 .gl-figure-footer {
@@ -73,14 +72,6 @@
   align-items: center;
   flex-wrap: wrap;
   padding: 10px 14px;
-}
-.gl-figure-toolbar {
-  background: white;
-  border-bottom: 1px solid #dce3ec;
-}
-.gl-figure-toolbar input {
-  width: 230px;
-  font-weight: 600;
 }
 .gl-figure-subtle,
 .gl-figure-viewbar,
@@ -396,6 +387,7 @@
 .gl-figure-viewport.is-marquee { user-select: none; cursor: crosshair; }
 .gl-figure-marquee { position: absolute; border: 1px solid #2f80ed; background: #2f80ed1f; pointer-events: none; z-index: 2; }
 .gl-figure-paper {
+  position: relative;
   width: max-content;
   background: white;
   padding: 14px;
@@ -494,9 +486,6 @@
     width: 250px;
     flex-basis: 250px;
   }
-  .gl-figure-toolbar .gl-figure-subtle {
-    display: none;
-  }
 }
 @media (max-width: 620px) {
   .gl-figure-body {
@@ -507,9 +496,6 @@
     flex: 0 0 230px;
     border-right: 0;
     border-bottom: 1px solid #dce3ec;
-  }
-  .gl-figure-toolbar input {
-    width: 150px;
   }
 }
 .gl-figure-grid th,
@@ -554,3 +540,25 @@
 /* A summary chart spanning columns is drawn wider than its cells and moved left, its value axis in
    the margin left of the first column (FigureChartPanel's summaryChartPlacement). */
 .gl-figure-chart.gl-figure-summary { overflow: visible; }
+/* The plots' tabs (SheetTabs.tsx) keep the Layout sheet tabs' look, not this tab's button style. */
+.gl-figure-workspace .gl-layout-sheet-tab,
+.gl-figure-workspace .gl-layout-sheet-add {
+  border: 1px solid transparent; border-bottom: 0; border-radius: 5px 5px 0 0;
+  padding: 0 13px; color: #526071; background: transparent;
+}
+.gl-figure-workspace .gl-layout-sheet-tab:hover,
+.gl-figure-workspace .gl-layout-sheet-add:hover { color: #1e293b; background: #eef2f7; }
+.gl-figure-workspace .gl-layout-sheet-tab.active { color: #1d4ed8; border-color: #cbd5e1; background: #fff; font-weight: 600; }
+.gl-figure-workspace .gl-layout-sheet-add { width: 30px; padding: 0; font-size: 17px; }
+
+/* The figure's corner grip (FigureResizeHandle.tsx), drawn as the Plotting chart's. */
+.gl-figure-resize {
+  position: absolute; right: 3px; bottom: 3px; width: 14px; height: 14px; cursor: nwse-resize; touch-action: none; border-radius: 2px;
+  background: linear-gradient(135deg, transparent 0 45%, var(--muted) 45% 52%, transparent 52% 65%, var(--muted) 65% 72%, transparent 72% 85%, var(--muted) 85% 92%, transparent 92%);
+  opacity: 0.6;
+}
+.gl-figure-resize:hover { opacity: 1; background-color: var(--gl-color-hover); }
+.gl-figure-resize-size {
+  position: absolute; right: 22px; bottom: 3px; padding: 1px 6px; border-radius: 4px;
+  background: var(--gl-color-text); color: #fff; font-size: var(--gl-font-size-caption); white-space: nowrap; pointer-events: none;
+}

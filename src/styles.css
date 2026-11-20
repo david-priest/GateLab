@@ -165,6 +165,10 @@ input[type="number"]::-webkit-outer-spin-button {
   min-width: 0;
 }
 .gl-header .gl-error-line { display: block; white-space: normal; }
+/* A single note takes the room left, as the file line does, on one line cut with an ellipsis (its
+   tooltip has the whole note), so a long one no longer pushes the menus onto a second row. */
+.gl-header .gl-error:not(.gl-header-notes) { flex: 1 1 0; min-width: 12em; }
+.gl-header .gl-error:not(.gl-header-notes) .gl-error-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* A list of import or export notes: one chip in the header that opens them. */
 .gl-header .gl-error.gl-header-notes { position: relative; max-height: none; overflow: visible; flex: none; }
 .gl-header-notes > summary {
@@ -921,8 +925,15 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 .gl-prop-section-data { grid-column: 2; grid-row: 1; }
 .gl-prop-section-export { grid-column: 3; grid-row: 1; }
 .gl-prop-section-appearance { grid-column: 1 / -1; grid-row: 2; }
-.gl-prop-shelves { flex-basis: 100%; min-width: 0; }
-.gl-prop-shelves > h3 { margin: 4px 0 0; font-size: var(--gl-font-size-secondary); }
+.gl-prop-arrange { flex-basis: 100%; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.gl-prop-arrange > h3 { margin: 4px 0 0; font-size: var(--gl-font-size-secondary); }
+.gl-prop-arrange-inside, .gl-prop-arrange-panels { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 8px; border: 1px dashed var(--line); border-radius: 6px; }
+.gl-prop-arrange-label { flex-basis: 100%; font-weight: var(--gl-font-weight-semibold); font-size: var(--gl-font-size-secondary); }
+.gl-prop-arrange-inside > .gl-hint { flex-basis: 100%; margin: 0; }
+.gl-prop-arrange-row { flex-basis: 100%; justify-content: space-between; }
+.gl-prop-arrange-row > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-prop-arrange-note { margin: 0; }
+.gl-prop-arrange-summary { margin: 0; padding: 6px 8px; border-radius: 6px; background: var(--panel); color: var(--gl-color-text); font-size: var(--gl-font-size-secondary); }
 .gl-prop-pager { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: var(--gl-font-size-secondary); }
 .gl-prop-order { flex-basis: 100%; min-width: 0; font-size: var(--gl-font-size-secondary); color: var(--muted); }
 .gl-prop-order > summary { display: flex; align-items: center; gap: 5px; min-width: 0; }
@@ -1558,6 +1569,10 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
   border-radius: 999px; background: #eaf3ff; padding: 2px 7px;
   color: #245d9c !important; font-size: 9px !important; font-weight: 700; white-space: nowrap;
 }
+.gl-comp-matrix-size { display: inline-flex; align-items: center; gap: 6px; }
+.gl-comp-matrix-size .gl-mini-btn[aria-pressed="true"] { background: var(--active); border-color: var(--accent); }
+.gl-comp-matrix-size input[type="range"] { width: 96px; }
+.gl-comp-matrix-stage.is-values-hidden .gl-comp-cell { color: transparent; }
 .gl-comp-matrix-legend { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
 .gl-comp-matrix-legend span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .gl-comp-matrix-legend i { width: 10px; height: 10px; border: 1px solid rgba(70,80,95,0.22); border-radius: 2px; }
@@ -2275,6 +2290,11 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 /* Proportions tab — SVG composition chart */
 .gl-prop-chart-scroll { flex: 1; min-height: 0; overflow: auto; }
 .gl-prop-chart { display: flex; flex-direction: column; align-items: stretch; gap: 10px; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px; width: max-content; }
+.gl-prop-chart-frame { position: relative; display: inline-block; vertical-align: top; max-width: none; }
+.gl-prop-chart-resize { position: absolute; right: 3px; bottom: 3px; width: 14px; height: 14px; cursor: nwse-resize; touch-action: none; border-radius: 2px;
+  background: linear-gradient(135deg, transparent 0 45%, var(--muted) 45% 52%, transparent 52% 65%, var(--muted) 65% 72%, transparent 72% 85%, var(--muted) 85% 92%, transparent 92%); opacity: .6; }
+.gl-prop-chart-resize:hover { opacity: 1; background-color: var(--gl-color-hover); }
+.gl-prop-chart-resize-size { position: absolute; right: 22px; bottom: 3px; padding: 1px 6px; border-radius: 4px; background: var(--gl-color-text); color: #fff; font-size: var(--gl-font-size-caption); white-space: nowrap; pointer-events: none; }
 .gl-prop-panels { display: grid; grid-template-columns: max-content; justify-content: center; align-items: start; gap: 12px; }
 /* A Layout block that holds only the legend draws no panels; the empty grid takes no gap. */
 .gl-prop-panels:empty { display: none; }
@@ -2314,7 +2334,8 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 }
 
 /* The reused D3 targets this id and reads its clientWidth/Height. */
-#cytof-plot-container {
+/* The Gating tab draws up to four of these, the first under the id the D3 knows and the rest numbered (plotContainerId). */
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) {
   flex: none; /* size to the canvas cytof draws; centered by .gl-plot-area */
   position: relative;
   box-sizing: content-box; /* so the left gutter below is added OUTSIDE cytof's inline width:PLOT_W */
@@ -2332,8 +2353,8 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 /* Main gating-plot typography. The reused D3 renderer writes inline font sizes, so these
    variable-backed rules intentionally use !important; GatingPlot repaints after a change so
    its measured gate-label backgrounds remain in sync with the text. */
-#cytof-plot-container .x-axis .tick text,
-#cytof-plot-container .y-axis .tick text {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .x-axis .tick text,
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .y-axis .tick text {
   font-size: var(--gl-gating-font-tick) !important;
 }
 /* Every plot's axes are d3's, which writes font-family="sans-serif" on each axis group. A generic
@@ -2341,29 +2362,29 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
    tick labels drew in a Japanese face, wider than in English. Named here, they draw in one face in
    both languages: the one English already resolved sans-serif to. */
 svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
-#cytof-plot-container .cytof-xlabel,
-#cytof-plot-container .cytof-ylabel {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .cytof-xlabel,
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .cytof-ylabel {
   font-size: var(--gl-gating-font-axis) !important;
 }
 /* The axis titles as the histogram's channel field, a little smaller: the title in a thin box,
    in the text colour (patchAxisLabelBoxes draws the box; the renderer's own blue is overridden). */
-#cytof-plot-container .gl-axis-label-box {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .gl-axis-label-box {
   fill: #fff;
   stroke: var(--line);
   stroke-width: 1;
 }
-#cytof-plot-container .cytof-xlabel,
-#cytof-plot-container .cytof-ylabel {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .cytof-xlabel,
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .cytof-ylabel {
   fill: var(--text) !important;
 }
-#cytof-plot-container .cytof-title {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .cytof-title {
   font-size: var(--gl-gating-font-title) !important;
 }
-#cytof-plot-container .gate-label > text {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .gate-label > text {
   font-size: var(--gl-gating-font-gate) !important;
 }
-#cytof-plot-container .gate-label > text > tspan + tspan,
-#cytof-plot-container .quadrant-gate text {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .gate-label > text > tspan + tspan,
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .quadrant-gate text {
   font-size: calc(var(--gl-gating-font-gate) - 1px) !important;
 }
 
@@ -2383,13 +2404,60 @@ svg g[font-family="sans-serif"] { font-family: Helvetica, Arial, sans-serif; }
 }
 
 /* Rectangle drawing preview: an open gate-like outline rather than SVG's default black fill. */
-#cytof-plot-container .rubber-band {
+:is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) .rubber-band {
   fill: none;
   stroke: var(--accent);
   stroke-width: 2px;
   pointer-events: none;
   vector-effect: non-scaling-stroke;
 }
+
+/* Gating tab, more than one plot (ui/gatingPlotViews.ts). One plot: the grid is a box around the
+   plot area and changes nothing. Several: square cells, the selected plot's outlined. */
+.gl-plot-grid { flex: 1; display: flex; min-height: 0; min-width: 0; }
+/* The gap and the padding are set with the cell size (App: plotGridStyle), which allows for them. */
+.gl-plot-grid.is-multi {
+  display: grid; justify-content: safe center; align-content: safe center;
+  overflow: auto; background: var(--workspace);
+}
+/* Every plot sits at the same whole-pixel place in its cell, top-left and not centred: centred, one
+   plot could land on a half pixel and its 1 px axes and frame smear over two pixels, looking heavier
+   than the other plots' (the plots are also laid out at their cell's exact size: patchExactPlotSize). The engine draws a plot 14 px narrower and 20 px shorter than its cell
+   (32 px narrower, plus its 18 px left gutter and 12 px below), so 7 px a side and 10 px above and
+   below hold it in the middle. */
+.gl-plot-grid.is-multi > .gl-plot-area,
+.gl-plot-peer-cell > .gl-plot-peer {
+  padding: 10px 7px; overflow: hidden; justify-content: flex-start; align-items: flex-start;
+}
+/* Each plot's white square 5 px larger than the plot's own a side, without moving what is drawn in it,
+   so the name and the close button sit inside the white; the selected plot has a thin accent line on
+   that square's edge, and its population's name in the accent. */
+.gl-plot-grid.is-multi :is(#cytof-plot-container, #cytof-plot-container-2, #cytof-plot-container-3, #cytof-plot-container-4, #cytof-plot-container-5) {
+  box-shadow: 0 0 0 5px #fff, 0 1px 12px rgba(0, 0, 0, 0.1);
+}
+.gl-plot-grid.is-multi > .gl-plot-area #cytof-plot-container { outline: 1px solid var(--accent); outline-offset: 5px; }
+.gl-plot-grid.is-multi > .gl-plot-area .gl-plot-peer-name { color: var(--accent); font-weight: 600; }
+.gl-plot-peer-cell { display: flex; min-width: 0; min-height: 0; }
+.gl-plot-peer {
+  position: relative; flex: 1; display: flex;
+  min-width: 0; min-height: 0; background: var(--workspace);
+}
+/* The whole plot is the button that selects it; nothing under it takes the pointer. */
+.gl-plot-peer-select {
+  position: absolute; inset: 0; z-index: 3; border: 0; border-radius: 6px; background: transparent; padding: 0;
+}
+.gl-plot-peer-select:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.gl-plot-peer-name {
+  position: absolute; top: 10px; left: 12px; right: 34px; z-index: 2; overflow: hidden;
+  color: var(--muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
+}
+.gl-plot-peer-empty { color: var(--muted); font-size: var(--gl-font-size-caption); padding: 16px; text-align: center; }
+.gl-plot-remove {
+  position: absolute; top: 7px; right: 8px; z-index: 4; width: 20px; height: 20px; padding: 0;
+  border: 1px solid transparent; border-radius: 4px; background: transparent;
+  color: var(--muted); font-size: 15px; line-height: 1;
+}
+.gl-plot-remove:hover, .gl-plot-remove:focus-visible { border-color: var(--line); background: var(--bg); color: var(--text); }
 
 /* ── Right sidebar: gate list + population tree ─────────────────── */
 .gl-side {
@@ -3479,7 +3547,13 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
 .gl-layout-controls .gl-layout-inspector { padding: 14px 0; background: white; border-top: 1px solid #e2e8f0; border-bottom: none; }
 .gl-layout-controls select, .gl-layout-controls input:not([type="checkbox"]) { width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box; }
 .gl-layout-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.gl-layout-dimensions label { display: grid; gap: 4px; }
+/* Two fields side by side (an item's X, Y, width and height; the page's size; tiles), each drawn as a
+   field of the Fonts group is (.gl-field-inline): a muted label over a thin-edged box. */
+.gl-layout-dimensions label { display: grid; gap: 8px; font-size: var(--gl-font-size-secondary); color: var(--muted); }
+.gl-layout-dimensions input {
+  background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 5px; font-size: var(--gl-font-size-secondary);
+}
 .gl-layout-item.is-text { min-width: 24px; min-height: 20px; }
 .gl-layout-item.has-frame { --gl-edge: #94a3b8; --gl-edge-width: 1px; }
 .gl-layout-text-surface { display: block; width: 100%; height: 100%; padding: 2px; margin: 0; border: 0; outline: none; resize: none; background: transparent; font-family: Arial, Helvetica, sans-serif; box-sizing: border-box; }
@@ -3507,9 +3581,6 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
 .gl-plotting-inspector .gl-ctl-sep { display: none; }
 .gl-plotting-filelist { max-height: max(160px, 40vh); overflow: auto; margin: 6px 0 12px; }
 .gl-plotting-actions { display: flex; align-items: center; gap: 8px; color: #64748b; font-size: var(--gl-font-size-secondary); }
-.gl-plotting-charts { display: flex; flex-direction: column; gap: 6px; padding-bottom: 10px; margin-bottom: 10px; border-bottom: 1px solid #d7dee8; }
-.gl-plotting-charts .gl-plotting-actions { flex-wrap: wrap; gap: 6px; }
-.gl-plotting-charts select, .gl-plotting-chart-name { flex: 1 1 auto; min-width: 0; }
 .gl-plotting-inspector .gl-check { display: flex; align-items: flex-start; gap: 7px; margin: 3px 0; white-space: normal; overflow-wrap: anywhere; }
 .gl-plotting-workspace .gl-prop-body { min-width: 0; min-height: 0; overflow: auto; padding: 24px; }
 .gl-plotting-workspace .gl-prop-chart-scroll { overflow: visible; }
@@ -3557,10 +3628,83 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
   flex: 0 0 auto; font-size: var(--gl-font-size-caption); font-weight: var(--gl-font-weight-semibold); color: var(--gl-color-accent);
 }
 .gl-comp-lib-menu { flex: 0 0 auto; }
+/* A matrix's versions, under its row: the newest first, the one in use marked as the row is. */
+.gl-comp-lib-row:has(.gl-comp-lib-versions-toggle) { flex-wrap: wrap; }
+.gl-comp-lib-versions-toggle {
+  flex: 0 0 100%; margin: 0; padding: 0; border: 0; background: none; text-align: left;
+  font: inherit; font-size: var(--gl-font-size-caption); color: var(--gl-color-text-secondary);
+}
+.gl-comp-lib-versions-toggle::before { content: "▸ "; }
+.gl-comp-lib-versions-toggle[aria-expanded="true"]::before { content: "▾ "; }
+.gl-comp-lib-versions-toggle:hover { color: var(--gl-color-text); }
+.gl-comp-lib-versions { flex: 0 0 100%; list-style: none; margin: 0; padding: 0 0 0 var(--gl-space-3); border-left: 1px solid var(--line); }
+.gl-comp-lib-version { display: flex; align-items: center; gap: var(--gl-space-2); min-height: 32px; }
+.gl-comp-lib-version-name { font-size: var(--gl-font-size-caption); color: var(--gl-color-text); }
+.gl-comp-lib-version.is-active .gl-comp-lib-version-name { font-weight: var(--gl-font-weight-semibold); }
 .gl-comp-matrices > .gl-comp-status, .gl-comp-matrices > .gl-comp-error { margin-top: var(--gl-space-2); }
 .gl-comp-lib-dialog { max-width: 520px; }
 .gl-comp-lib-dialog p { margin: 0 0 var(--gl-space-2); }
 .gl-comp-lib-uncovered ul { margin: var(--gl-space-1) 0 var(--gl-space-2); padding-left: var(--gl-space-4); }
+/* "Calculate from controls…" (CompensationControlsDialog): the files table, then the selected
+   control's histogram beside the findings, then the matrix. */
+.gl-modal.gl-comp-controls {
+  width: min(1240px, calc(100vw - 32px)); max-height: calc(100vh - 32px);
+  display: flex; flex-direction: column; gap: var(--gl-space-2); overflow-y: auto;
+}
+.gl-comp-controls .gl-modal-title { margin-bottom: 0; }
+.gl-comp-controls-intro { margin: 0; font-size: var(--gl-font-size-caption); color: var(--gl-color-text-secondary); }
+.gl-comp-controls-bar { display: flex; align-items: center; gap: var(--gl-space-2); flex-wrap: wrap; }
+.gl-comp-controls-body { display: flex; flex-direction: column; gap: var(--gl-space-2); flex: 0 0 auto; }
+.gl-comp-controls-files { max-height: 34vh; min-height: 96px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; }
+.gl-comp-controls-side { display: flex; gap: var(--gl-space-3); align-items: flex-start; }
+.gl-comp-controls-histogram, .gl-comp-controls-side > .gl-hint { flex: 0 1 54%; min-width: 0; }
+.gl-comp-controls-report { flex: 1 1 46%; min-width: 0; max-height: 240px; overflow: auto; }
+.gl-comp-controls-table { width: 100%; border-collapse: collapse; font-size: var(--gl-font-size-caption); }
+.gl-comp-controls-table th {
+  position: sticky; top: 0; z-index: 1; background: var(--panel); text-align: left; white-space: nowrap;
+  font-weight: var(--gl-font-weight-semibold); color: var(--gl-color-text-secondary);
+  padding: var(--gl-space-1) var(--gl-space-2); border-bottom: 1px solid var(--line);
+}
+.gl-comp-controls-table td { padding: 2px var(--gl-space-2); border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+.gl-comp-controls-table tr.is-control:hover { background: var(--gl-color-hover); }
+.gl-comp-controls-table tr.is-selected { background: var(--gl-color-selected); box-shadow: inset 2px 0 0 var(--gl-color-accent); }
+.gl-comp-controls-table tr.is-unused td { color: var(--gl-color-text-tertiary); }
+.gl-comp-controls-table select { font: inherit; min-width: 104px; max-width: 190px; height: 22px; }
+.gl-comp-controls-file { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-comp-controls-events { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.gl-comp-controls-table td.gl-comp-controls-notes { min-width: 260px; white-space: normal; color: var(--gl-color-text-secondary); }
+.gl-comp-controls-histogram-head { display: flex; align-items: center; gap: var(--gl-space-2); font-size: var(--gl-font-size-body); }
+.gl-comp-controls-histogram-head strong { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gl-comp-controls-plot { width: 100%; height: auto; display: block; background: #fff; border: 1px solid var(--line); border-radius: 4px; touch-action: none; }
+.gl-comp-controls-own { fill: #c9d3df; stroke: #5b6b7f; stroke-width: 1; }
+.gl-comp-controls-other { fill: none; stroke: #1f6feb; stroke-width: 1.2; stroke-dasharray: 4 3; }
+.gl-comp-controls-negative { fill: rgba(31, 111, 235, 0.13); }
+.gl-comp-controls-positive { fill: rgba(211, 84, 0, 0.14); }
+.gl-comp-controls-axis, .gl-comp-controls-tick line { stroke: #5b6b7f; stroke-width: 1; }
+.gl-comp-controls-tick text { font-size: 10px; fill: #26384e; }
+.gl-comp-controls-handle { cursor: ew-resize; outline: none; }
+.gl-comp-controls-handle line { stroke-width: 2; }
+.gl-comp-controls-handle.is-negative line { stroke: #1f6feb; }
+.gl-comp-controls-handle.is-negative path { fill: #1f6feb; }
+.gl-comp-controls-handle.is-positive line { stroke: #d35400; }
+.gl-comp-controls-handle.is-positive path { fill: #d35400; }
+.gl-comp-controls-handle:focus-visible line { stroke-width: 4; }
+.gl-comp-controls-counts { display: flex; flex-wrap: wrap; gap: var(--gl-space-1) var(--gl-space-3); margin: var(--gl-space-1) 0 0; font-size: var(--gl-font-size-caption); font-variant-numeric: tabular-nums; }
+.gl-comp-controls-counts .is-negative { color: #1f6feb; }
+.gl-comp-controls-counts .is-positive { color: #d35400; }
+.gl-comp-controls-histogram > .gl-hint { margin: var(--gl-space-1) 0 0; }
+.gl-comp-controls-report h4, .gl-comp-controls-matrix h4 { margin: 0 0 var(--gl-space-1); font-size: var(--gl-font-size-body); }
+.gl-comp-controls-report ul { margin: 0; padding-left: var(--gl-space-4); font-size: var(--gl-font-size-caption); }
+.gl-comp-controls-report li { margin-bottom: 2px; }
+.gl-comp-controls-matrix { flex: 0 0 auto; min-height: 0; }
+.gl-comp-controls-matrix-scroll { max-height: 40vh; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+.gl-comp-controls-matrix table { border-collapse: collapse; font-size: var(--gl-font-size-caption); font-variant-numeric: tabular-nums; color: #26384e; }
+.gl-comp-controls-matrix th { position: sticky; top: 0; background: #f5f7fa; padding: 2px 6px; text-align: right; white-space: nowrap; font-weight: var(--gl-font-weight-semibold); }
+.gl-comp-controls-matrix tbody th { position: sticky; left: 0; top: auto; text-align: left; }
+.gl-comp-controls-matrix td { padding: 2px 6px; text-align: right; border: 1px solid #e3e8ee; min-width: 52px; }
+.gl-comp-controls-actions { align-items: center; }
+.gl-comp-controls-name { display: flex; align-items: center; gap: var(--gl-space-2); margin-right: auto; font-size: var(--gl-font-size-caption); }
+.gl-comp-controls-name input { font: inherit; width: 260px; height: var(--gl-control-height-compact); }
 .gl-comp-inspector-left > section > h3:first-child { margin-top: 0; }
 .gl-comp-inspector-left .gl-comp-review-population,
 .gl-comp-inspector-left .gl-comp-preview-events,
@@ -3664,7 +3808,9 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
 .gl-plotting-tree-name { flex: 1 1 auto; min-width: 0; text-align: left; border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: default; }
 .gl-plotting-tree-row.off-arm { color: #94a3b8; }
 .gl-plotting-tree-row.off-arm:hover { color: var(--text); }
-.gl-plotting-workspace:not(.section-plot) .gl-prop-section-plot, .gl-plotting-workspace:not(.section-plot) .gl-prop-section-data { display: none; }
+/* Data: files, populations and the grouping columns; Plot: what is drawn; Arrange: the panels'
+   shelves; as the Illustration tab's sections. */
+.gl-plotting-workspace:not(.section-plot) .gl-prop-section-plot, .gl-plotting-workspace:not(.section-data) .gl-prop-section-data, .gl-plotting-workspace:not(.section-arrange) .gl-prop-section-arrange { display: none; }
 .gl-plotting-workspace:not(.section-style) .gl-prop-section-appearance { display: none; }
 .gl-plotting-workspace:not(.section-export) .gl-prop-section-export { display: none; }
 .gl-prop-legend[hidden] { display: none; }
@@ -4011,6 +4157,18 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
   display: flex; align-items: center; gap: 6px; padding: 1px 6px;
   background: color-mix(in srgb, var(--bg) 88%, transparent); border-radius: 4px;
 }
+/* The grip at the plot card's bottom-right corner (GatingPlotResizeHandle), drawn as the Plotting chart's. */
+.gl-plot-resize {
+  position: absolute; z-index: 3; transform: translate(-100%, -100%); width: 14px; height: 14px; margin: -3px 0 0 -3px;
+  cursor: nwse-resize; touch-action: none; border-radius: 2px; opacity: .6;
+  background: linear-gradient(135deg, transparent 0 45%, var(--muted) 45% 52%, transparent 52% 65%, var(--muted) 65% 72%, transparent 72% 85%, var(--muted) 85% 92%, transparent 92%);
+}
+.gl-plot-resize:hover { opacity: 1; background-color: var(--gl-color-hover); }
+.gl-plot-resize-outline { position: absolute; z-index: 3; border: 1px dashed var(--accent); pointer-events: none; }
+.gl-plot-resize-size {
+  position: absolute; z-index: 4; transform: translate(-100%, 4px); padding: 1px 6px; border-radius: 4px;
+  background: var(--gl-color-text); color: #fff; font-size: var(--gl-font-size-caption); white-space: nowrap; pointer-events: none;
+}
 .gl-plot-legend-slot { flex: 0 0 auto; min-height: 32px; max-height: 52px; overflow: auto; }
 
 /* Side panel: the gates list is one height, set by dragging the divider under it (--gl-gate-list-height
@@ -4326,7 +4484,7 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 }
 /* A legend line's height is set, not the font's own, so a block's frame can count it (CHART_LEGEND_LINE). */
 .gl-layout-proportions-host .gl-prop-legend { line-height: 1.4; }
-/* A block drawn at the sheet's text sizes in a frame too small for it: clipped, and marked so. */
+/* A block drawn at the sheet's text sizes in a frame too small for it: drawn smaller, and marked so. */
 .gl-layout-proportions-host { position: relative; }
 .gl-layout-too-small {
   position: absolute;
@@ -4859,4 +5017,110 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
   .gl-layout-workspace { flex-direction: column; }
   .gl-layout-controls { width: 100%; flex: none; max-height: 45vh; overflow: auto; border-right: 0; border-bottom: 1px solid var(--line); }
   .gl-layout-canvas-scroll { min-height: 60vh; padding: 8px; }
+}
+
+/* ChannelChecklist: a search field and bulk buttons over a scrolling list of channel checkboxes. */
+.gl-channel-checklist { border: 1px solid var(--border); border-radius: 4px; padding: 6px; margin: 4px 0; min-width: 0; }
+.gl-channel-checklist-bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 4px; }
+.gl-channel-checklist-bar input[type="search"] { flex: 1 1 140px; min-width: 0; }
+.gl-channel-checklist-rows { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; }
+.gl-channel-checklist-empty { color: var(--muted); padding: 4px 0; }
+.gl-figure-heatmap-channels { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* Plotting's charts and Illustration's figures: a tab each across the top, drawn as the Layout
+   tab's sheet tabs (SheetTabs.tsx), with the tab's Undo and Redo at the strip's right end. */
+.gl-tab-panel.gl-sheet-tabbed { padding: 0; }
+.gl-sheet-tabs { flex: 0 0 auto; }
+.gl-sheet-tabs-list { display: flex; align-items: end; gap: 3px; min-width: 0; }
+.gl-sheet-tabs-end { display: flex; align-items: center; gap: 6px; margin-left: auto; padding: 0 0 4px 12px; }
+@media (max-width: 760px) {
+  .gl-tab-panel.gl-tab-fill.gl-sheet-tabbed { overflow: visible; }
+}
+
+/* The Plotting tab has no header row: its Layout actions are under Export and its intro toggle by
+   the section tabs, as on the Illustration tab. */
+.gl-plotting-workspace.gl-plotting-headless { grid-template-rows: minmax(0, 1fr); }
+.gl-plotting-inspector .gl-presentation-tabs .gl-tab-intro-show { margin-left: auto; }
+.gl-prop-layout-actions { flex-wrap: wrap; gap: 6px; }
+@media (max-width: 760px) {
+  .gl-plotting-workspace.gl-plotting-headless { grid-template-rows: auto; }
+}
+
+/* Compensation tab, Check view: every pair of a mass-cytometry matrix against the events. */
+.gl-comp-screen-scope {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  border: 1px solid var(--line); border-radius: 5px; background: #fbfcfe; padding: 6px 8px;
+  color: var(--muted); font-size: var(--gl-font-size-caption);
+}
+.gl-comp-screen-scope progress { width: 140px; }
+.gl-comp-screen-scope small { flex-basis: 100%; font-size: 10px; line-height: 1.4; }
+.gl-comp-screen-oxide {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border: 1px solid var(--line); border-left: 3px solid #2f80ed; border-radius: 4px;
+  background: #f7fbff; padding: 7px 9px;
+}
+.gl-comp-screen-oxide > div { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
+.gl-comp-screen-oxide strong { font-size: var(--gl-font-size-caption); }
+.gl-comp-screen-oxide span { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.gl-comp-screen-oxide .gl-mini-btn { flex: none; }
+.gl-comp-screen-filters { display: flex; flex-wrap: wrap; gap: 5px; }
+.gl-comp-screen-table-wrap { min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 5px; }
+.gl-comp-screen-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: var(--gl-font-size-caption); }
+.gl-comp-screen-table thead th:nth-child(2) { width: 62px; }
+.gl-comp-screen-table thead th:nth-child(3) { width: 104px; }
+.gl-comp-screen-table thead th:nth-child(4) { width: 92px; }
+.gl-comp-screen-table thead th:nth-child(5) { width: 104px; }
+.gl-comp-screen-table thead th {
+  position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--line);
+  padding: 5px 8px; color: var(--muted); font-size: 10px; font-weight: 600; text-align: left; white-space: nowrap;
+}
+.gl-comp-screen-table tbody tr { border-bottom: 1px solid var(--line); }
+.gl-comp-screen-table tbody tr:last-child { border-bottom: 0; }
+.gl-comp-screen-table tbody tr:hover { background: var(--gl-color-hover); }
+.gl-comp-screen-table tbody tr.is-selected { background: var(--gl-color-selected); }
+.gl-comp-screen-table td, .gl-comp-screen-table tbody th { padding: 5px 8px; text-align: left; vertical-align: middle; font-weight: 400; }
+.gl-comp-screen-table .is-number { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gl-comp-screen-table td em {
+  margin-left: 5px; border-radius: 3px; background: #eaf3ff; padding: 1px 4px;
+  color: #245d9c; font-size: 9px; font-style: normal;
+}
+.gl-comp-screen-pair {
+  display: flex; flex-direction: column; gap: 1px; border: 0; background: none; padding: 0;
+  color: inherit; font: inherit; text-align: left;
+}
+.gl-comp-screen-pair strong { font-weight: 600; }
+.gl-comp-screen-pair small { color: var(--muted); font-size: 9.5px; }
+.gl-comp-screen-reading {
+  display: inline-block; border-radius: 3px; padding: 2px 6px; font-size: 10px; line-height: 1.3;
+  background: #eef0f3; color: #4b5563;
+}
+.gl-comp-screen-table td:last-child { white-space: nowrap; }
+.gl-comp-screen-pair { overflow-wrap: anywhere; }
+.gl-comp-screen-reading.is-above { background: #fff1dc; color: #80500f; }
+.gl-comp-screen-reading.is-below { background: #eaf3ff; color: #245d9c; }
+.gl-comp-screen-reading.is-bound { background: #f1ebfa; color: #66458f; }
+.gl-comp-screen-reading.is-consistent { background: #e8f5ec; color: #2f6b45; }
+.gl-comp-screen-badge { flex-wrap: wrap; }
+.gl-comp-screen-badge span { flex: 1 1 200px; font-size: 10px; }
+.gl-comp-screen-badge .gl-mini-btn { flex: none; }
+.gl-comp-screen-badge.is-above { border-left-color: #d17a22; background: #fffaf2; }
+.gl-comp-screen-badge.is-below { border-left-color: #2f80ed; background: #f7fbff; }
+.gl-comp-screen-badge.is-bound { border-left-color: #8465b3; background: #fbf9ff; }
+.gl-comp-screen-badge.is-consistent { border-left-color: #4a9d68; }
+.gl-comp-screen-badge.is-dim { border-left-color: #a8b0bc; }
+.gl-comp-floor-plot { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.gl-comp-floor-plot svg { width: 100%; max-width: 360px; height: auto; }
+.gl-comp-floor-frame { fill: #fff; stroke: var(--line); }
+.gl-comp-floor-events { fill: none; stroke: #5b6b7f; stroke-width: 1.6; stroke-linecap: round; opacity: 0.35; }
+.gl-comp-floor-matrix { fill: none; stroke: #d17a22; stroke-width: 1.6; }
+.gl-comp-floor-bound { fill: none; stroke: #2f80ed; stroke-width: 1.4; stroke-dasharray: 4 3; }
+.gl-comp-floor-point { fill: #fff; stroke: #1b2027; stroke-width: 1.4; }
+.gl-comp-floor-tick { fill: var(--muted); font-size: 8.5px; font-family: var(--gl-font-family, sans-serif); }
+.gl-comp-floor-axis { fill: var(--text); font-size: 9px; font-family: var(--gl-font-family, sans-serif); }
+.gl-comp-floor-plot figcaption { display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--muted); font-size: 10px; }
+.gl-comp-floor-plot figcaption span { display: inline-flex; align-items: center; gap: 5px; }
+.gl-comp-floor-plot figcaption i { display: inline-block; width: 16px; height: 0; border-top: 2px solid #d17a22; }
+.gl-comp-floor-plot figcaption i.is-bound { border-top: 2px dashed #2f80ed; }
+.gl-comp-floor-plot figcaption i.is-point {
+  width: 7px; height: 7px; border: 1.4px solid #1b2027; border-radius: 50%; background: #fff;
 }

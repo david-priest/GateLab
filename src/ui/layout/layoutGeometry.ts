@@ -30,8 +30,16 @@ export function unitToPx(value: number, unit: LengthUnit): number {
 }
 
 /**
+ * The smallest frame a typed size gives an item. A biplot or histogram made smaller than it is
+ * drawn is shown scaled to its frame, as a dragged one is, so its only floor is a pixel.
+ */
+export function typedMinimum(kind: LayoutItem["recipe"]["kind"]): { width: number; height: number } {
+  return kind === "biplot" || kind === "histogram" ? { width: 1, height: 1 } : layoutItemMinimum(kind);
+}
+
+/**
  * The frame fields a typed value sets. With the proportions kept, a width sets the height too
- * (and the reverse) so the item keeps its ratio; neither goes under the item's minimum.
+ * (and the reverse) so the item keeps its ratio; neither goes under the item's typed minimum.
  */
 export function framePatch(
   item: Pick<LayoutItem, "width" | "height" | "recipe">,
@@ -40,7 +48,7 @@ export function framePatch(
   keepRatio: boolean,
 ): Partial<Record<FrameField, number>> {
   if (field === "x" || field === "y") return { [field]: Math.max(0, px) };
-  const minimum = layoutItemMinimum(item.recipe.kind);
+  const minimum = typedMinimum(item.recipe.kind);
   const value = Math.max(minimum[field], px);
   if (!keepRatio || item.width <= 0 || item.height <= 0) return { [field]: value };
   if (field === "width") {

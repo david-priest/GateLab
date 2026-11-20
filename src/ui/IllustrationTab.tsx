@@ -5,6 +5,9 @@ import { FoldSummary } from "./FoldSummary";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { SearchableSelect } from "./SearchableSelect";
+import { ChannelChecklist } from "./ChannelChecklist";
+import { movedSheetTabs, SheetTabs, uniqueSheetTabName } from "./SheetTabs";
+import { FigureResizeHandle } from "./FigureResizeHandle";
 import { DimensionShelves } from "./DimensionShelves";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { CoreState } from "../store";
@@ -18,6 +21,8 @@ import {
   canonicalPopulation,
   figureLabelKey,
   captureFigureTransforms,
+  heatmapChannels,
+  histogramChannels,
   figureHierarchies,
   figurePopulationOptions,
   figurePopulationApplies,
@@ -234,6 +239,22 @@ export function IllustrationTab({
   );
   const figure = config.figure!;
   const [section, setSection] = useState("data");
+  // One plot is shown at a time, chosen by the tabs across the top as the Layout tab chooses its
+  // sheet; its editor is the one in Plots. The choice is the session's: the saved figure keeps
+  // every plot, a Layout block can take them all, and Export and "Add panels to Layout" take the
+  // plot shown. A plot added (by Add plot, Duplicate or an undo) is shown.
+  const [shownPlotId, setShownPlotId] = useState<string | null>(() => figure.plots[0]?.id ?? null);
+  const viewedPlot = figure.plots.find((p) => p.id === shownPlotId) ?? figure.plots[0];
+  const viewFigure = useMemo(() => (viewedPlot ? { ...figure, plots: [viewedPlot] } : figure), [figure, viewedPlot]);
+  const viewConfig = viewedPlot ? { ...config, figure: viewFigure } : config;
+  const plotIds = figure.plots.map((p) => p.id).join("\u0000");
+  const knownPlotIds = useRef(new Set(figure.plots.map((p) => p.id)));
+  useEffect(() => {
+    const added = figure.plots.filter((p) => !knownPlotIds.current.has(p.id));
+    knownPlotIds.current = new Set(figure.plots.map((p) => p.id));
+    if (added.length) showPlot(added[added.length - 1].id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plotIds]);
   const [panelMenu, setPanelMenu] = useState<ContextMenuState | null>(null);
   // Panels chosen by clicking them: what "Add selected panels to the Layout tab" takes. A plain
   // click chooses one; Cmd-click (Ctrl on Windows) adds one or takes it out; Shift-click takes the
@@ -248,6 +269,8 @@ export function IllustrationTab({
     [previewWidth, setPreviewWidth] = useState(800);
   const [paperWidth, setPaperWidth] = useState(0);
   const paper = useRef<HTMLDivElement>(null);
+  // While the figure's corner is dragged: the stretch shown, kept as the panel size on release.
+  const [dragScale, setDragScale] = useState(1);
   const [exportFormat, setExportFormat] = useState("svg"),
     [exportDpi, setExportDpi] = useState(300),
     [exportAll, setExportAll] = useState(true);
@@ -329,7 +352,7 @@ export function IllustrationTab({
   const layoutKey = JSON.stringify([
     figure.sampleIds,
     figure.populations,
-    figure.plots,
+    viewFigure.plots,
     figure.rows,
     figure.columns,
     figure.pages,
@@ -348,7 +371,7 @@ export function IllustrationTab({
   ]);
   const layout = useMemo(() => {
     try {
-      const pages = layoutFigure(figure, samples, trees, populationMetadata, metadataLevels).map(headOverlaidPopulations);
+      const pages = layoutFigure(viewFigure, samples, trees, populationMetadata, metadataLevels).map(headOverlaidPopulations);
       if (pages.some((page) => page.panels.length > 256))
         throw new Error(
           t("This page has more than 256 panels. Move Files / samples or Populations to Pages in Arrange, or select fewer items."),
@@ -456,6 +479,35 @@ export function IllustrationTab({
   const addPanelPagesToLayout = () => {
     const placed = pages.map((each) => ({ label: each.label, ...placedRecipesFor(each.panels.filter((panel) => panel.plot.type !== "heatmap"), each) })).filter((each) => each.recipes.length);
     if (placed.length) onAddPanelPagesToLayout?.(placed, figure.panelSize);
+  };
+  /** The scale that fits the figure, drawn at 100%, to the preview's width. */
+  const fitFigureScale = () => {
+    const page = paper.current, view = viewport.current;
+    if (!page || !view) return null;
+    const width = page.getBoundingClientRect().width / (scale || 1);
+    return width > 0 ? Math.max(0.1, (view.clientWidth - 40) / width) : null;
+  };
+  /** Show a plot, from its tab: its first page, scrolled to the top. */
+  function showPlot(id: string) {
+    if (id === viewedPlot?.id) return;
+    setShownPlotId(id);
+    setPageIndex(0);
+    viewport.current?.scrollTo?.({ top: 0, left: 0 });
+  }
+  /** A new scatter plot of the first two channels the files offer. */
+  const newBiplot = (): FigurePlot => ({
+    id: crypto.randomUUID(),
+    name: uniqueSheetTabName(figure.plots.map((p) => ({ id: p.id, name: p.name })), `Plot ${figure.plots.length + 1}`),
+    x: channels[0]?.[0] ?? defaultX,
+    y: channels[1]?.[0] ?? defaultY,
+    type: "biplot",
+  });
+  /** The plot's tab removed: the plot before it is shown. */
+  const removePlot = (id: string) => {
+    const index = figure.plots.findIndex((p) => p.id === id);
+    const rest = figure.plots.filter((p) => p.id !== id);
+    if (id === viewedPlot?.id && rest.length) setShownPlotId(rest[Math.max(0, index - 1)].id);
+    editFigure({ plots: rest });
   };
   const pagesMenu = useEveryPageMenu();
   const selectedPanels = page ? page.panels.filter((p) => selectedPanelKeys.has(p.key)) : [];
@@ -711,7 +763,7 @@ export function IllustrationTab({
       meta: meta(ref),
     }));
   };
-  const figureChannels = useMemo(() => [...new Set(figure.plots.flatMap((plot) => (plot.type === "histogram" || plot.type === "chart" ? [plot.x] : [plot.x, plot.y])).filter(Boolean))], [figure.plots]);
+  const figureChannels = useMemo(() => [...new Set(figure.plots.flatMap((plot) => (plot.type === "histogram" ? histogramChannels(plot) : plot.type === "chart" ? [plot.x] : [plot.x, plot.y])).filter(Boolean))], [figure.plots]);
   const selectedSamples = figure.sampleIds
     .map((id) => samples.find((s) => s.id === id))
     .filter((s): s is FigureSample => !!s);
@@ -971,15 +1023,31 @@ export function IllustrationTab({
   }
   return (
     <div className="gl-figure-workspace">
-      <header className="gl-figure-toolbar">
-        <input
-          aria-label="Figure name"
-          value={figure.name}
-          disabled={exporting}
-          onChange={(e) => editFigure({ name: e.target.value })}
-        />
-        <span className="gl-figure-subtle">Stored in workspace</span>
+      <SheetTabs
+        items={figure.plots.map((p) => ({ id: p.id, name: p.name || t("Unnamed plot") }))}
+        activeId={viewedPlot?.id ?? ""}
+        label={t("Plots")}
+        addTitle={t("New plot")}
+        disabled={exporting}
+        onSelect={showPlot}
+        onRename={(id, name) => editFigure({ plots: figure.plots.map((p) => (p.id === id ? { ...p, name } : p)) })}
+        onMove={(id, to) => {
+          const plots = movedSheetTabs(figure.plots, id, to);
+          if (plots.some((p, i) => p.id !== figure.plots[i].id)) editFigure({ plots });
+        }}
+        onAdd={() => editFigure({ plots: [...figure.plots, newBiplot()] })}
+        onDuplicate={(id) => {
+          const at = figure.plots.findIndex((p) => p.id === id);
+          const source = figure.plots[at];
+          if (!source) return;
+          const copy = { ...structuredClone(source), id: crypto.randomUUID(), name: uniqueSheetTabName(figure.plots.map((p) => ({ id: p.id, name: p.name })), `${source.name || t("Unnamed plot")} copy`) };
+          editFigure({ plots: [...figure.plots.slice(0, at + 1), copy, ...figure.plots.slice(at + 1)] });
+        }}
+        onDelete={removePlot}
+      >
         <button
+          type="button"
+          className="gl-mini-btn"
           disabled={!history.length || exporting}
           onClick={() => {
             setFuture((f) => [config, ...f]);
@@ -987,9 +1055,11 @@ export function IllustrationTab({
             setHistory((h) => h.slice(0, -1));
           }}
         >
-          Undo
+          {t("Undo")}
         </button>
         <button
+          type="button"
+          className="gl-mini-btn"
           disabled={!future.length || exporting}
           onClick={() => {
             setHistory((h) => [...h, config]);
@@ -997,39 +1067,9 @@ export function IllustrationTab({
             setFuture((f) => f.slice(1));
           }}
         >
-          Redo
+          {t("Redo")}
         </button>
-        <span className="gl-figure-flex" />
-        <button onClick={onOpenGating}>Edit gates</button>
-        <button onClick={() => setSection("export")}>Export…</button>
-        {(onAddFigureToLayout || onAddToLayout) && (
-          <div className="gl-plotting-head-actions">
-            {onAddFigureToLayout && (
-              <button
-                type="button"
-                disabled={exporting || !figure.sampleIds.length || !figure.populations.length || !figure.plots.length}
-                title={t("One block on the Layout tab, drawn there as it is here, heatmaps and style included")}
-                onClick={(event) => pagesMenu.open(event, pages.length, () => onAddFigureToLayout(structuredClone(config), currentPage), onAddFigurePagesToLayout && (() => onAddFigurePagesToLayout(structuredClone(config), pages.map((each) => each.label))))}
-              >
-                {t("Add to Layout")}
-              </button>
-            )}
-            {onAddToLayout && (
-              <button
-                type="button"
-                disabled={exporting || !page || !page.panels.some((panel) => panel.plot.type !== "heatmap")}
-                title={t("One Layout plot per panel of this page, arranged on the Layout tab's current sheet as here")}
-                onClick={(event) => pagesMenu.open(event, pages.length, () => {
-                  if (page) addPanelsToLayout(page.panels.filter((panel) => panel.plot.type !== "heatmap"));
-                }, onAddPanelPagesToLayout && addPanelPagesToLayout)}
-              >
-                {t("Add panels to Layout")}
-              </button>
-            )}
-            {pagesMenu.menu}
-          </div>
-        )}
-      </header>
+      </SheetTabs>
       <div className="gl-figure-body">
         <aside className="gl-figure-inspector" aria-label="Figure inspector" style={{ width: "var(--gl-left-pane-width, 290px)", flex: "0 0 var(--gl-left-pane-width, 290px)" }}>
           <nav role="tablist" aria-label="Figure settings">
@@ -1062,7 +1102,7 @@ export function IllustrationTab({
                 {
                   {
                     data: "Data",
-                    plots: "Plots",
+                    plots: "Plot",
                     arrange: "Arrange",
                     style: "Style",
                     export: "Export",
@@ -1101,8 +1141,13 @@ export function IllustrationTab({
                 Populations <span>{figure.populations.length} selected</span>
               </h3>
               <small className="gl-figure-plot-overlay-note">
-                {t("Ticked populations are drawn by every plot set to follow them (Plots → Populations).")}
+                {t("Ticked populations are drawn by every plot set to follow them (Plot → Populations).")}
               </small>
+              <div className="gl-figure-actions">
+                <button type="button" title={t("The populations' gates are drawn and changed on the Gating tab")} onClick={onOpenGating}>
+                  {t("Edit gates")}
+                </button>
+              </div>
               <PopulationChecklist
                 compact
                 heading={false}
@@ -1273,69 +1318,6 @@ export function IllustrationTab({
                 ))}
               </details>
               ) : null}
-              <details>
-                <FoldSummary>Saved figures & presets</FoldSummary>
-                <label>
-                  Preset
-                  <select
-                    value={preset}
-                    onChange={(e) => setPreset(e.target.value)}
-                  >
-                    <option value="">Choose…</option>
-                    {presets.map((p) => (
-                      <option key={p.name}>{p.name}</option>
-                    ))}
-                  </select>
-                </label>
-                <div className="gl-figure-actions">
-                  <button
-                    disabled={!preset}
-                    onClick={() => {
-                      const p = presets.find((p) => p.name === preset);
-                      if (p)
-                        change({
-                          ...p.config,
-                          figure: migrateFigure(
-                            p.config,
-                            samples,
-                            trees,
-                            state.active_hierarchy_id,
-                            defaultX,
-                            defaultY,
-                          ),
-                        });
-                    }}
-                  >
-                    Load
-                  </button>
-                  <button
-                    disabled={!preset}
-                    onClick={() => {
-                      onDeletePreset(preset);
-                      setPreset("");
-                    }}
-                  >
-                    Delete preset
-                  </button>
-                </div>
-                <label>
-                  Save as
-                  <input
-                    value={presetName}
-                    onChange={(e) => setPresetName(e.target.value)}
-                  />
-                </label>
-                <button
-                  disabled={!presetName.trim()}
-                  onClick={() => {
-                    configRef.current = config;
-                    onSavePreset(presetName.trim());
-                    setPresetName("");
-                  }}
-                >
-                  Save figure preset
-                </button>
-              </details>
             </section>
             <section
               hidden={section !== "plots"}
@@ -1344,8 +1326,13 @@ export function IllustrationTab({
               aria-labelledby="figure-tab-plots"
             >
               <h3 title={t("Each plot has its own axes; the plots repeat across the selected files and populations.")}>Plot definitions</h3>
-              {figure.plots.map((plot, index) => (
-                <div className="gl-figure-plot-editor" key={plot.id}>
+              {/* The shown plot's editor; the others are a tab away. */}
+              {figure.plots.filter((plot) => plot.id === viewedPlot?.id).map((plot) => (
+                <div
+                  className="gl-figure-plot-editor"
+                  key={plot.id}
+                  id={`figure-plot-editor-${plot.id}`}
+                >
                   <label>
                     Name
                     <input
@@ -1437,8 +1424,40 @@ export function IllustrationTab({
                       )}
                     </>
                   )}
+                  {(plot.type === "heatmap" || plot.type === "histogram") && (() => {
+                    const heatmap = plot.type === "heatmap";
+                    const chosen = heatmap ? heatmapChannels(plot) : histogramChannels(plot);
+                    return (
+                      <div className="gl-figure-heatmap-channels">
+                        <span title={heatmap ? t("Each ticked channel is a column of the heatmap, in the order ticked") : t("Each ticked channel is a histogram of its own, in the order ticked, as a plot would be")}>
+                          {t("Channels: {count}", { count: String(chosen.length) })}
+                        </span>
+                        <ChannelChecklist
+                          label={heatmap ? t("Heatmap channels · {name}", { name: plot.name }) : t("Histogram channels · {name}", { name: plot.name })}
+                          options={[
+                            ...chosen.filter((key) => !channels.some(([option]) => option === key)).map((key) => ({ key, label: t("{name} (unavailable)", { name: key }) })),
+                            ...channels.map(([key, label]) => ({ key, label })),
+                          ]}
+                          checked={chosen}
+                          onToggle={(keys, on) => {
+                            const kept = on
+                              ? [...chosen, ...keys.filter((key) => !chosen.includes(key))]
+                              : chosen.filter((key) => !keys.includes(key));
+                            // A heatmap keeps at least one channel: unticking every one leaves the first.
+                            const next = kept.length ? kept : chosen.slice(0, 1);
+                            if (next.join("\u0000") === chosen.join("\u0000")) return;
+                            editFigure({
+                              plots: figure.plots.map((p) =>
+                                p.id === plot.id ? { ...p, x: next[0], channels: next } : p,
+                              ),
+                            });
+                          }}
+                        />
+                      </div>
+                    );
+                  })()}
                   {(["x", "y"] as const)
-                    .filter((axis) => (axis === "x" || plot.type === "biplot") && !(plot.type === "chart" && plot.chart?.valueKind === "proportion"))
+                    .filter((axis) => plot.type !== "heatmap" && plot.type !== "histogram" && (axis === "x" || plot.type === "biplot") && !(plot.type === "chart" && plot.chart?.valueKind === "proportion"))
                     .map((axis) => (
                       <label key={axis}>
                         {plot.type === "chart" ? t("Channel") : `${axis.toUpperCase()} channel`}
@@ -1558,52 +1577,13 @@ export function IllustrationTab({
                     </>
                   )}
                   <div className="gl-figure-actions">
-                    <button
-                      disabled={index === 0}
-                      aria-label={`Move ${plot.name} up`}
-                      onClick={() =>
-                        editFigure({ plots: move(figure.plots, index, -1) })
-                      }
-                    >
-                      Up
-                    </button>
-                    <button
-                      disabled={index === figure.plots.length - 1}
-                      aria-label={`Move ${plot.name} down`}
-                      onClick={() =>
-                        editFigure({ plots: move(figure.plots, index, 1) })
-                      }
-                    >
-                      Down
-                    </button>
-                    <button
-                      onClick={() =>
-                        editFigure({
-                          plots: figure.plots.filter((p) => p.id !== plot.id),
-                        })
-                      }
-                    >
+                    <button onClick={() => removePlot(plot.id)}>
                       Remove
                     </button>
                   </div>
                 </div>
               ))}
-              <button
-                onClick={() =>
-                  editFigure({
-                    plots: [
-                      ...figure.plots,
-                      {
-                        id: crypto.randomUUID(),
-                        name: `Plot ${figure.plots.length + 1}`,
-                        x: channels[0]?.[0] ?? defaultX,
-                        y: channels[1]?.[0] ?? defaultY,
-                        type: "biplot",
-                      },
-                    ],
-                  })
-                }
-              >
+              <button onClick={() => editFigure({ plots: [...figure.plots, newBiplot()] })}>
                 Add plot
               </button>
               <button
@@ -2245,11 +2225,85 @@ export function IllustrationTab({
               role="tabpanel"
               aria-labelledby="figure-tab-export"
             >
+              <label>
+                {t("Figure name")}
+                <input
+                  aria-label={t("Figure name")}
+                  title={t("Names the exported files and the figure's Layout blocks")}
+                  value={figure.name}
+                  disabled={exporting}
+                  onChange={(e) => editFigure({ name: e.target.value })}
+                />
+              </label>
+              {(onAddFigureToLayout || onAddToLayout) && (
+                <h3>{t("To the Layout tab")}</h3>
+              )}
+              {(onAddFigureToLayout || onAddToLayout) && (
+                <div className="gl-figure-actions gl-figure-layout-actions">
+                  {onAddFigureToLayout && (
+                    <button
+                      type="button"
+                      disabled={exporting || !figure.sampleIds.length || !figure.populations.length || !figure.plots.length}
+                      title={t("One block on the Layout tab, drawn there as it is here, heatmaps and style included")}
+                      onClick={(event) => {
+                        const thisPlot = () => onAddFigureToLayout(structuredClone(viewConfig), currentPage);
+                        const thisPlotPages = onAddFigurePagesToLayout && (() => onAddFigurePagesToLayout(structuredClone(viewConfig), pages.map((each) => each.label)));
+                        if (figure.plots.length < 2) {
+                          pagesMenu.open(event, pages.length, thisPlot, thisPlotPages);
+                          return;
+                        }
+                        // Several plots: the one shown, or every plot as the figure arranges them.
+                        let wholePages: string[] = [];
+                        try {
+                          wholePages = layoutFigure(figure, samples, trees, populationMetadata, metadataLevels).map((each) => each.label);
+                        } catch {
+                          wholePages = [];
+                        }
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setPanelMenu({
+                          x: rect.left,
+                          y: rect.bottom + 2,
+                          label: t("Add to Layout"),
+                          items: [
+                            { label: t("This plot"), title: t("The plot shown, its page shown, on the Layout tab's current sheet"), onClick: thisPlot },
+                            ...(thisPlotPages && pages.length > 1
+                              ? [{ label: t("This plot, every page ({count})", { count: pages.length }), title: t("A new sheet per page after the current sheet, named by the page"), onClick: thisPlotPages }]
+                              : []),
+                            "separator" as const,
+                            { label: t("Every plot (the whole figure)"), title: t("Every plot in one block, arranged as the figure arranges them; its first page"), onClick: () => onAddFigureToLayout(structuredClone(config), 0) },
+                            ...(onAddFigurePagesToLayout && wholePages.length > 1
+                              ? [{ label: t("Every plot, every page ({count})", { count: wholePages.length }), title: t("A new sheet per page after the current sheet, named by the page"), onClick: () => onAddFigurePagesToLayout(structuredClone(config), wholePages) }]
+                              : []),
+                          ],
+                        });
+                      }}
+                    >
+                      {t("Add to Layout")}
+                    </button>
+                  )}
+                  {onAddToLayout && (
+                    <button
+                      type="button"
+                      disabled={exporting || !page || !page.panels.some((panel) => panel.plot.type !== "heatmap")}
+                      title={t("One Layout plot per panel of this page, arranged on the Layout tab's current sheet as here")}
+                      onClick={(event) => pagesMenu.open(event, pages.length, () => {
+                        if (page) addPanelsToLayout(page.panels.filter((panel) => panel.plot.type !== "heatmap"));
+                      }, onAddPanelPagesToLayout && addPanelPagesToLayout)}
+                    >
+                      {t("Add panels to Layout")}
+                    </button>
+                  )}
+                  {pagesMenu.menu}
+                </div>
+              )}
               <h3>Export current page</h3>
               <p>
                 Page {currentPage + 1} of {pages.length || 1}. Export is
                 independent of preview zoom.
               </p>
+              {figure.plots.length > 1 && (
+                <p>{t("Export takes the plot shown. For every plot together, add the whole figure to Layout and export it there.")}</p>
+              )}
               <label>
                 Format
                 <select
@@ -2292,6 +2346,69 @@ export function IllustrationTab({
               {problems.length > 0 && (
                 <p role="alert">Resolve unavailable panels before exporting.</p>
               )}
+              <details>
+                <FoldSummary>Saved figures & presets</FoldSummary>
+                <label>
+                  Preset
+                  <select
+                    value={preset}
+                    onChange={(e) => setPreset(e.target.value)}
+                  >
+                    <option value="">Choose…</option>
+                    {presets.map((p) => (
+                      <option key={p.name}>{p.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <div className="gl-figure-actions">
+                  <button
+                    disabled={!preset}
+                    onClick={() => {
+                      const p = presets.find((p) => p.name === preset);
+                      if (p)
+                        change({
+                          ...p.config,
+                          figure: migrateFigure(
+                            p.config,
+                            samples,
+                            trees,
+                            state.active_hierarchy_id,
+                            defaultX,
+                            defaultY,
+                          ),
+                        });
+                    }}
+                  >
+                    Load
+                  </button>
+                  <button
+                    disabled={!preset}
+                    onClick={() => {
+                      onDeletePreset(preset);
+                      setPreset("");
+                    }}
+                  >
+                    Delete preset
+                  </button>
+                </div>
+                <label>
+                  Save as
+                  <input
+                    value={presetName}
+                    onChange={(e) => setPresetName(e.target.value)}
+                  />
+                </label>
+                <button
+                  disabled={!presetName.trim()}
+                  onClick={() => {
+                    configRef.current = config;
+                    onSavePreset(presetName.trim());
+                    setPresetName("");
+                  }}
+                >
+                  Save figure preset
+                </button>
+              </details>
             </section>
           </fieldset>
         </aside>
@@ -2494,7 +2611,7 @@ export function IllustrationTab({
               <div
                 className="gl-figure-paper"
                 ref={paper}
-                style={{ zoom: scale, opacity: settling ? 0.55 : 1 }}
+                style={{ zoom: scale, opacity: settling ? 0.55 : 1, ...(dragScale !== 1 ? { transform: `scale(${dragScale})`, transformOrigin: "0 0" } : {}) }}
               >
                 <FigureGrid
                   page={shown.page}
@@ -2526,6 +2643,29 @@ export function IllustrationTab({
                     editFigure({ labelOffsets: { ...figure.labelOffsets, [key]: offset } });
                   }}
                 />
+                {viewedPlot?.type === "heatmap" ? (
+                  <FigureResizeHandle
+                    page={() => paper.current}
+                    size={config.heatmapCellSize ?? 28}
+                    range={[12, 120]}
+                    sizeLabel={t("Cell size")}
+                    disabled={exporting}
+                    onPreview={setDragScale}
+                    onCommit={(heatmapCellSize) => style({ heatmapCellSize })}
+                    fitScale={fitFigureScale}
+                  />
+                ) : (
+                  <FigureResizeHandle
+                    page={() => paper.current}
+                    size={figure.panelSize}
+                    range={[200, 600]}
+                    sizeLabel={t("Panel size")}
+                    disabled={exporting}
+                    onPreview={setDragScale}
+                    onCommit={(panelSize) => editFigure({ panelSize })}
+                    fitScale={fitFigureScale}
+                  />
+                )}
               </div>
             )}
             {marquee && <div className="gl-figure-marquee" aria-hidden="true" style={marquee} />}

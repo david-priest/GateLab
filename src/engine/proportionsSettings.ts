@@ -9,7 +9,24 @@ import { OVERLAY_PALETTES, type PaletteName } from "./palettes";
 export const PROPORTIONS_SAMPLE_FACTOR = "__sample__";
 export const PROPORTIONS_NO_FACTOR = "";
 
-export interface ProportionsSettings {
+/**
+ * A summary heatmap (`valueKind` "heatmap"): a row per population in each replicate unit (each
+ * file, or the files of a unit pooled), ordered by the groups when there are any, a column per
+ * channel of `channels`, each cell the `statistic` (median or mean) of the channel's display values,
+ * as the Illustration tab's summary heatmap computes it. How it is scaled, coloured and ordered is
+ * the chart's own.
+ */
+export interface ProportionsHeatmapSettings {
+  heatmapScale: "none" | "column_quantile" | "column_minmax" | "row_minmax" | "column_zscore";
+  heatmapPalette: "rdylbu" | "blue_white_yellow_red" | "viridis" | "heat";
+  heatmapClusterRows: boolean;
+  heatmapClusterColumns: boolean;
+  heatmapShowValues: boolean;
+  /** A cell's side, in px. */
+  heatmapCellSize: number;
+}
+
+export interface ProportionsSettings extends ProportionsHeatmapSettings {
   /** The files drawn, by id. */
   files: string[];
   hierarchy: string;
@@ -19,13 +36,13 @@ export interface ProportionsSettings {
    * replicate units), a channel's value in each of the population's cells (a violin or a box), or
    * a statistic of a channel in each replicate unit (a box, bars or points, a point per unit).
    */
-  valueKind: "proportion" | "cells" | "statistic";
+  valueKind: "proportion" | "cells" | "statistic" | "heatmap";
   /**
    * A stacked bar, a boxplot, bars and points draw proportions; a violin, a split violin (two
    * groups' halves side by side), a boxplot and ridgelines draw cells; a boxplot, bars and points
    * draw a statistic.
    */
-  plotType: "stacked" | "box" | "violin" | "bar" | "dots" | "splitViolin" | "ridgeline";
+  plotType: "stacked" | "box" | "violin" | "bar" | "dots" | "splitViolin" | "ridgeline" | "heatmap";
   /** The channel a per-cell or statistic chart draws, by key; empty until one is chosen. The first of `channels`. */
   channel: string;
   /**
@@ -141,6 +158,48 @@ export interface ProportionsSettings {
    * before it has none.
    */
   followFigureStyle?: boolean;
+  /** How a ridgeline chart draws its ridges and their labels; absent, as DEFAULT_RIDGELINE_STYLE. */
+  ridgeline?: RidgelineStyle;
+}
+
+/** How a ridgeline chart draws its ridges and the labels of its rows. */
+export interface RidgelineStyle {
+  /** How far each ridge overlaps the row above it, as a fraction of its height: 0 (none) to 0.9. */
+  overlap: number;
+  /** Fill under each ridge, at `fillOpacity`; off, the outline alone. */
+  fill: boolean;
+  fillOpacity: number;
+  /** Each ridge's outline: in the ridge's own colour, in black, or none; `outlineWidth` pixels wide. */
+  outline: "colour" | "black" | "none";
+  outlineWidth: number;
+  /** The rows' labels beside every panel, or only beside the first panel of each row of panels. */
+  labels: "every" | "first";
+}
+
+/** Ridgelines as they were drawn before the style could be set. */
+export const DEFAULT_RIDGELINE_STYLE: RidgelineStyle = { overlap: 0.7, fill: true, fillOpacity: 0.85, outline: "colour", outlineWidth: 1, labels: "every" };
+
+export const RIDGELINE_RANGES = { overlap: [0, 0.9], fillOpacity: [0.05, 1], outlineWidth: [0.25, 4] } as const satisfies Record<string, [number, number]>;
+
+/**
+ * A ridgeline style from anything saved: each field within range over the defaults, a ridge with
+ * neither fill nor outline given its outline back; undefined when nothing valid differs from the
+ * defaults, so a chart that never set it saves without it.
+ */
+export function normalizeRidgelineStyle(value: unknown): RidgelineStyle | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const held = value as Record<string, unknown>;
+  const out: RidgelineStyle = { ...DEFAULT_RIDGELINE_STYLE };
+  for (const [key, [min, max]] of Object.entries(RIDGELINE_RANGES) as [keyof typeof RIDGELINE_RANGES, readonly [number, number]][]) {
+    const number = held[key];
+    if (typeof number === "number" && Number.isFinite(number)) out[key] = Math.max(min, Math.min(max, number));
+  }
+  if (typeof held.fill === "boolean") out.fill = held.fill;
+  if (held.outline === "colour" || held.outline === "black" || held.outline === "none") out.outline = held.outline;
+  if (held.labels === "every" || held.labels === "first") out.labels = held.labels;
+  if (!out.fill && out.outline === "none") out.outline = "colour";
+  const differs = (Object.keys(DEFAULT_RIDGELINE_STYLE) as (keyof RidgelineStyle)[]).some((key) => out[key] !== DEFAULT_RIDGELINE_STYLE[key]);
+  return differs ? out : undefined;
 }
 
 export const PROPORTIONS_NUMERIC_RANGES: Record<string, [number, number]> = {
@@ -150,6 +209,7 @@ export const PROPORTIONS_NUMERIC_RANGES: Record<string, [number, number]> = {
   height: [140, 800],
   pointRadius: [0.5, 5],
   panelsPerRow: [1, 12],
+  heatmapCellSize: [12, 120],
 };
 
 /** A set panel width's bounds; 0 means the panel is fitted to its contents. */
@@ -201,6 +261,12 @@ export const BASE_PROPORTIONS_SETTINGS: ProportionsSettings = {
   valueFromZero: true,
   shareValueAxis: null,
   replicateMarks: "none",
+  heatmapScale: "column_quantile",
+  heatmapPalette: "rdylbu",
+  heatmapClusterRows: false,
+  heatmapClusterColumns: false,
+  heatmapShowValues: true,
+  heatmapCellSize: 28,
 };
 
 /** A settings object from anything saved: known fields within range over the defaults given, the rest dropped. */
@@ -218,8 +284,10 @@ export function normalizeProportionsSettings(value: unknown, defaults: Proportio
   out.channels = consistentChannels(candidate.channels, out.channel);
   if (out.channels.length) out.channel = out.channels[0];
   if (candidate.categoryKind === "population" || candidate.categoryKind === "division") out.categoryKind = candidate.categoryKind;
-  if (candidate.valueKind === "proportion" || candidate.valueKind === "cells" || candidate.valueKind === "statistic") out.valueKind = candidate.valueKind;
-  if (["stacked", "box", "violin", "bar", "dots", "splitViolin", "ridgeline"].includes(candidate.plotType as string)) out.plotType = candidate.plotType as ProportionsSettings["plotType"];
+  if (candidate.valueKind === "proportion" || candidate.valueKind === "cells" || candidate.valueKind === "statistic" || candidate.valueKind === "heatmap") out.valueKind = candidate.valueKind;
+  if (["stacked", "box", "violin", "bar", "dots", "splitViolin", "ridgeline", "heatmap"].includes(candidate.plotType as string)) out.plotType = candidate.plotType as ProportionsSettings["plotType"];
+  if (["none", "column_quantile", "column_minmax", "row_minmax", "column_zscore"].includes(candidate.heatmapScale as string)) out.heatmapScale = candidate.heatmapScale as ProportionsSettings["heatmapScale"];
+  if (["rdylbu", "blue_white_yellow_red", "viridis", "heat"].includes(candidate.heatmapPalette as string)) out.heatmapPalette = candidate.heatmapPalette as ProportionsSettings["heatmapPalette"];
   if (candidate.statistic === "median" || candidate.statistic === "mean" || candidate.statistic === "geomean") out.statistic = candidate.statistic;
   if (candidate.errorBar === "sd" || candidate.errorBar === "sem") out.errorBar = candidate.errorBar;
   if (candidate.proportionValue === "parent" || candidate.proportionValue === "total" || candidate.proportionValue === "count") out.proportionValue = candidate.proportionValue;
@@ -238,12 +306,14 @@ export function normalizeProportionsSettings(value: unknown, defaults: Proportio
     if (limit === null || (typeof limit === "number" && Number.isFinite(limit))) out[key] = limit;
   }
   if (candidate.shareValueAxis === null || typeof candidate.shareValueAxis === "boolean") out.shareValueAxis = candidate.shareValueAxis;
-  for (const key of ["includeUngated", "averagePerUnit", "grid", "points", "paired", "legend", "violinBox", "test", "showN", "valueFromZero"] as const) {
+  for (const key of ["includeUngated", "averagePerUnit", "grid", "points", "paired", "legend", "violinBox", "test", "showN", "valueFromZero", "heatmapClusterRows", "heatmapClusterColumns", "heatmapShowValues"] as const) {
     if (typeof candidate[key] === "boolean") out[key] = candidate[key] as boolean;
   }
   if (typeof candidate.followFigureStyle === "boolean") out.followFigureStyle = candidate.followFigureStyle;
   if (candidate.colourByPopulation === true) out.colourByPopulation = true;
   if (candidate.populationsTogether === true) out.populationsTogether = true;
+  const ridgeline = normalizeRidgelineStyle(candidate.ridgeline);
+  if (ridgeline) out.ridgeline = ridgeline;
   for (const [key, [min, max]] of Object.entries(PROPORTIONS_NUMERIC_RANGES)) {
     const number = candidate[key];
     if (typeof number === "number" && Number.isFinite(number)) (out as unknown as Record<string, number>)[key] = Math.max(min, Math.min(max, number));
@@ -261,6 +331,7 @@ export const FIGURE_CHART_SETTING_KEYS = [
   "xAxis", "errorBar", "test", "comparisons", "comparisonsShow", "proportionValue", "groupSel", "unitSel",
   "palette", "averagePerUnit", "points", "paired", "legend", "pointRadius", "showN", "valueMin", "valueMax",
   "valueFromZero", "shareValueAxis", "replicateMarks", "colourByPopulation", "populationsTogether", "includeUngated", "grid",
+  "ridgeline",
 ] as const;
 export type FigureChartSettings = Partial<Pick<ProportionsSettings, (typeof FIGURE_CHART_SETTING_KEYS)[number]>>;
 
@@ -304,6 +375,7 @@ export const PLOT_TYPES_BY_VALUE: Record<ProportionsSettings["valueKind"], reado
   proportion: ["stacked", "box", "bar", "dots"],
   cells: ["violin", "box", "splitViolin", "ridgeline"],
   statistic: ["box", "bar", "dots"],
+  heatmap: ["heatmap"],
 };
 
 /**

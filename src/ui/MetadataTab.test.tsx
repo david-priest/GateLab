@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Sample } from "../engine/sample";
@@ -78,6 +78,40 @@ describe("MetadataTab", () => {
     expect(inputs.map((input) => input.classList.contains("is-wide"))).toEqual([true, false]);
     const header = [...sampleTable().querySelectorAll<HTMLInputElement>("thead input")];
     expect(header.map((input) => [input.value, input.classList.contains("is-wide")])).toEqual([["sample_id", true], ["condition", false]]);
+  });
+
+  it("keeps the cell clicked right after a field is renamed, and the value typed into it", () => {
+    const onSetCell = vi.fn();
+    function Renaming() {
+      const [columns, setColumns] = useState([{ name: "field1" }]);
+      return (
+        <MetadataTab
+          samples={files} metadata={{}} columns={columns}
+          onSetCell={onSetCell} onAddColumn={vi.fn()}
+          onRenameColumn={(oldName, newName) => setColumns((cols) => cols.map((c) => (c.name === oldName ? { name: newName } : c)))}
+          onDeleteColumn={vi.fn()} onImport={vi.fn()}
+          populationRows={[]} populationMetadata={{}} populationColumns={[]}
+          onSetPopCell={vi.fn()} onAddPopColumn={vi.fn()} onRenamePopColumn={vi.fn()} onDeletePopColumn={vi.fn()}
+          groups={[]} fileGroups={{}}
+        />
+      );
+    }
+    act(() => root.render(<Renaming />));
+    const type = (input: HTMLInputElement, text: string) => act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, text);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const header = [...sampleTable().querySelectorAll<HTMLInputElement>("thead input")][1];
+    act(() => header.focus());
+    type(header, "treatment");
+    // Clicking the field's first cell blurs the header, which renames the field.
+    const firstCell = () => sampleTable().querySelectorAll<HTMLInputElement>("tbody tr:first-child input")[1];
+    act(() => firstCell().focus());
+    expect(headers()).toContain("treatment");
+    expect(document.activeElement).toBe(firstCell());
+    type(firstCell(), "treated");
+    act(() => firstCell().blur());
+    expect(onSetCell).toHaveBeenCalledWith("f1", "treatment", "treated");
   });
 
   it("hides both tables' explanations with one × and brings them back with the one ?", () => {

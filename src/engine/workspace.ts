@@ -18,6 +18,11 @@ import {
   portableAssayExpectedFileSizes,
   type PortableAssayArchiveEnvelope,
 } from "./workspacePortableAssays";
+import {
+  locateStoredAssays,
+  STORED_ASSAY_MANIFEST_PATH,
+  type StoredAssayArchive,
+} from "./workspaceStoredAssays";
 import type { LayoutWorkspace } from "./layout";
 import type { HierarchyRef } from "./hierarchies";
 import type { IllustrationDimensionLayout } from "./illustrationLayout";
@@ -37,6 +42,13 @@ export interface WorkspaceEnvelope {
   readonly fcsByPath: Record<string, Uint8Array> | null;
   readonly storage: WorkspaceStorage;
   readonly portableAssays: PortableAssayArchiveEnvelope | null;
+  /**
+   * A bundle's stored compensated assays (workspaceStoredAssays.ts), located but not read; absent
+   * or null where the bundle has none or was not opened from a File.
+   */
+  readonly storedAssays?: StoredAssayArchive | null;
+  /** Why a bundle's stored assays were set aside; the workspace opens without them. */
+  readonly storedAssaysProblem?: string;
 }
 
 export interface GatingFontSizes {
@@ -1299,6 +1311,7 @@ export async function readWorkspaceEnvelopeFromFile(file: File): Promise<Workspa
   const files = await readZipFileEntries(file, {
     select: (path) => path === "workspace.json" ||
       path === PORTABLE_ASSAY_MANIFEST_PATH ||
+      path === STORED_ASSAY_MANIFEST_PATH ||
       path.startsWith("data/") ||
       (path.startsWith("assays/") && path.endsWith(".f32")),
     expectedSize: (path) => expectedSizes.get(path),
@@ -1322,7 +1335,16 @@ export async function readWorkspaceEnvelopeFromFile(file: File): Promise<Workspa
       }
     },
   });
-  return workspaceEnvelopeFromArchiveFiles(files);
+  const envelope = workspaceEnvelopeFromArchiveFiles(files);
+  const storedManifest = files[STORED_ASSAY_MANIFEST_PATH];
+  if (!storedManifest) return envelope;
+  // Stored layers only spare a solve: a section that cannot be relied on is set aside, and the
+  // workspace opens as one without it.
+  try {
+    return { ...envelope, storedAssays: await locateStoredAssays(file, storedManifest) };
+  } catch (cause) {
+    return { ...envelope, storedAssays: null, storedAssaysProblem: cause instanceof Error ? cause.message : String(cause) };
+  }
 }
 
 function parseJson(text: string): unknown {

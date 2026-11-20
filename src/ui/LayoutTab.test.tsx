@@ -13,7 +13,7 @@ import { newGate, newPopulation, newRootPopulation } from "../engine/models";
 import { Sample } from "../engine/sample";
 import type { FcsFile } from "../engine/fcs";
 import type { FigureSample } from "../engine/figure";
-import { initialCoreState, type CoreState } from "../store";
+import { initialCoreState, recomputeGating, type CoreState } from "../store";
 import { I18nProvider } from "./i18n";
 import { LayoutTab } from "./LayoutTab";
 import { defaultIllustrationConfig } from "../engine/figureDefaults";
@@ -1652,6 +1652,20 @@ describe("LayoutTab iteration", () => {
     expect(Number(element("strip").querySelector<HTMLElement>(".strategy-grid")!.style.zoom)).toBeCloseTo(116 / 120, 4);
   });
 
+  it("fits a strip to a frame narrower or shorter than the smallest panel, rather than to 120 px", async () => {
+    const fx = gatedFixture();
+    const strip = { kind: "strategy" as const, sampleId: "D1", populationId: fx.childId, fullPath: true, displayMode: "pseudocolor" as const };
+    const workspace = createDefaultLayoutWorkspace();
+    // 100 px tall: the one panel fits at 100 - 8 - 26 = 66 px; 100 px wide: at 100 - 8 = 92 px.
+    workspace.sheets[0].items.push({ id: "short", x: 57, y: 57, width: 300, height: 100, z: 1, recipe: strip });
+    workspace.sheets[0].items.push({ id: "narrow", x: 57, y: 257, width: 100, height: 300, z: 1, recipe: strip });
+    mount(fx, {}, null, {}, workspace);
+    await flush();
+    const shownAt = (id: string) => Number(element(id).querySelector<HTMLElement>(".strategy-grid")!.style.zoom);
+    expect(shownAt("short")).toBeCloseTo(66 / 120, 4);
+    expect(shownAt("narrow")).toBeCloseTo(92 / 120, 4);
+  });
+
   it("marks a plot as pending until it has drawn, which the export waits for", async () => {
     mount(fixture());
     await flush();
@@ -1898,6 +1912,41 @@ describe("pooled Layout plots", () => {
     const grid = draws.multiStrategies.at(-1)!.payload as { nodes: { n_events: number; x: number[] }[]; strategy_context_title: string };
     expect(grid.nodes.map((node) => [node.n_events, node.x.length])).toEqual([[6, 6]]);
     expect(grid.strategy_context_title).toBe("2 files");
+  });
+
+  it.each(["strip", "grid"])("counts and names only the files drawn in a pooled strategy %s", async (kind) => {
+    const fx = gatedFixture();
+    // Both files hold CD4 and one gated event, but its detector identity differs in D2.
+    // The pooled strategy must exclude its three events rather than draw them on D1's axes.
+    Object.values(fx.state.gates)[0].x_channel = "CD4";
+    fx.samples.forEach((file, fileIndex) => {
+      const fcs = file.sample.fcs;
+      file.sample = new Sample({ ...fcs, channels: fcs.channels.map((channel, index) => index === 0 ? { ...channel, name: fileIndex === 0 ? "FITC-A" : "PE-A", marker: "CD4" } : channel) });
+    });
+    const memberships = () => fx.samples.map((file) => Array.from(recomputeGating(file.sample, fx.state).masks[fx.childId]));
+    expect(memberships()).toEqual([[1, 0, 0], [1, 0, 0]]);
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({
+      id: kind, x: 57, y: 57, width: 600, height: 300, z: 1,
+      recipe: { kind: "strategy", sampleId: "D1", populationId: fx.childId, ...(kind === "grid" ? { populationIds: [fx.childId] } : {}), fullPath: true, displayMode: "pseudocolor", title: "{sample} · {count}", pool: { sampleIds: ["D1", "D2"] } },
+    });
+    mount(fx, { "FSC-A": [0, 40], "SSC-A": [0, 40] }, null, {}, workspace);
+    await flush();
+    if (kind === "strip") {
+      const drawn = draws.strategies.at(-1)!.payload as { steps: { n_before: number; n_after: number; x: number[] }[]; strategy_context_title: string };
+      expect(drawn.steps.map((step) => [step.n_before, step.n_after, step.x.length])).toEqual([[3, 1, 3]]);
+      expect(drawn.strategy_context_title).toBe("1 of 2 files · 1");
+    } else {
+      const drawn = draws.multiStrategies.at(-1)!.payload as { nodes: { n_events: number; x: number[] }[]; strategy_context_title: string };
+      expect(drawn.nodes.map((node) => [node.n_events, node.x.length])).toEqual([[3, 3]]);
+      expect(drawn.strategy_context_title).toBe("1 of 2 files · 1");
+    }
+    select(kind);
+    const data = host.querySelector('.gl-layout-source[aria-label="Data"]')!;
+    expect([...data.querySelectorAll("dt")].map((term) => term.textContent)).toContain("File");
+    expect(data.textContent).toContain("D1.fcs");
+    expect(data.textContent).toContain("n = 1 event");
+    expect(memberships()).toEqual([[1, 0, 0], [1, 0, 0]]);
   });
 
   it("draws a strategy's gate edges as the Strategy tab sent them, and the default when it sent none", async () => {
@@ -2477,6 +2526,18 @@ describe("LayoutTab pages hold what is exported", () => {
     const message = host.querySelector(".gl-layout-message")?.textContent ?? "";
     expect(message).toContain("1 item lies outside the sheet's pages");
     expect(message).toContain("The PDF writer could not take page 2 as vector art; it is written as one image.");
+  });
+
+  it("drops what the last export said when the next one starts", async () => {
+    const workspace = createDefaultLayoutWorkspace();
+    workspace.sheets[0].items.push({ id: "note", x: 57, y: 57, width: 200, height: 60, z: 1, recipe: { kind: "text", text: "note", fontSize: 14 } });
+    mount(fixture(), {}, null, {}, workspace);
+    draws.writeReport = { loweredDpi: null, rasterPages: [1] };
+    await act(async () => { button("Export PDF").click(); await vi.runAllTimersAsync(); });
+    expect(host.querySelector(".gl-layout-message")?.textContent).toContain("The PDF writer could not take page 1 as vector art");
+    draws.writeReport = { loweredDpi: null, rasterPages: [] };
+    await act(async () => { button("Export PDF").click(); await vi.runAllTimersAsync(); });
+    expect(host.querySelector(".gl-layout-message")).toBeNull();
   });
 
   it("opens the item's menu on a right-click on a strategy panel, not the renderer's own", async () => {

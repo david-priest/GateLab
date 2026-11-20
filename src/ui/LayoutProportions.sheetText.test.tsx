@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // A Plotting block on a Layout sheet drawn with the sheet's text sizes: laid out to its frame's
-// size, its text the sheet's (as a flow plot's is), clipped and marked in a frame too small for
+// size, its text the sheet's (as a flow plot's is), drawn smaller and marked in a frame too small for
 // it, and its measured-value ticks written as the flow plots write them. A block saved before
 // the choice keeps its own sizes, zoomed. Synthetic files D1 to D4, groups control and treated;
 // nothing here is a real experiment.
@@ -162,11 +162,18 @@ describe("A Plotting block with the sheet's text sizes", () => {
     expect(panel().querySelector("text[font-weight='600']")!.getAttribute("font-size")).toBe("16");
   });
 
-  it("is clipped and marked in a frame too small for it at the sheet's sizes", () => {
+  it("is drawn smaller and marked in a frame too small for it at the sheet's sizes", () => {
     const fx = fixture();
+    // jsdom lays nothing out: the chart measures 400 by 300 px at its own size.
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(400);
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(300);
     surface(fx, { kind: "proportions", settings: fx.settings, panel: {}, textSize: "sheet" }, 60, 50);
     expect(tickFont()).toBe("13");
     expect(host.querySelector(".gl-layout-too-small")?.textContent).toBe("too small");
+    // Zoomed to the frame less the host's padding, whichever side is the tighter.
+    const zoom = host.querySelector<HTMLElement>(".gl-layout-figure-zoom")!.style.zoom;
+    expect(Number(zoom)).toBeCloseTo(Math.min((60 - 8) / 400, (50 - 8) / 300), 6);
+    vi.restoreAllMocks();
   });
 
   it("writes its measured-value ticks as the flow plots do", () => {

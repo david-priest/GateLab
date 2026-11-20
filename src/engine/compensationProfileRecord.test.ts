@@ -126,6 +126,112 @@ describe("compensation profile baseline records", () => {
     ).rejects.toThrow(/started as the identity/);
   });
 
+  it("accepts a calculated origin, a matrix estimated from single-stained controls", async () => {
+    const origin = {
+      controls: [
+        {
+          row: "control",
+          negative: { count: 2408, fileName: "Compensation Controls_A Stained Control.fcs", upper: 22.5 },
+          events: {
+            lower: 1524,
+            population: " Beads ",
+            fileDigest: DIGEST_A,
+            fileName: "Compensation Controls_A Stained Control.fcs",
+            count: 2369,
+          },
+          channel: "A",
+        },
+        { channel: "B", row: "fallback", fromMatrixHash: DIGEST_B },
+        { row: "none", channel: "C" },
+      ],
+      estimatorVersion: "1",
+      estimator: "median-difference",
+      type: "calculated",
+    } as unknown as NewBaselineMetadata["origin"];
+    const record = await baseline("baseline.calculated", flowScientific(), { origin });
+    expect(record.origin).toEqual({
+      type: "calculated",
+      estimator: "median-difference",
+      estimatorVersion: "1",
+      controls: [
+        {
+          channel: "A",
+          row: "control",
+          events: {
+            fileName: "Compensation Controls_A Stained Control.fcs",
+            fileDigest: DIGEST_A,
+            count: 2369,
+            population: "Beads",
+            lower: 1524,
+          },
+          negative: { fileName: "Compensation Controls_A Stained Control.fcs", count: 2408, upper: 22.5 },
+        },
+        { channel: "B", row: "fallback", fromMatrixHash: DIGEST_B },
+        { channel: "C", row: "none" },
+      ],
+    });
+    expect(Object.isFrozen(record.origin)).toBe(true);
+    // The origin is no part of what is hashed: the same matrix imported has the same hashes.
+    const imported = await baseline("baseline.imported", flowScientific());
+    expect(record.matrixHash).toBe(imported.matrixHash);
+    expect(record.profileHash).toBe(imported.profileHash);
+    // It survives a save and reopen, and an edit keeps it.
+    const reopened = await validateCompensationProfileRecord(JSON.parse(JSON.stringify(record)));
+    expect(reopened).toEqual(record);
+    const edited = await createCompensationProfileRevision(record, flowScientific(0.2), {
+      profileId: "revision.calculated",
+      createdAt: CREATED,
+    });
+    expect(edited.origin).toEqual(record.origin);
+  });
+
+  it("accepts another estimator by its identifier, and a control read without negative events", async () => {
+    const origin = {
+      type: "calculated",
+      estimator: "robust-regression",
+      estimatorVersion: "1",
+      controls: [{ channel: "A", row: "control", events: { fileName: "a.fcs", count: 4800 } }],
+    } as unknown as NewBaselineMetadata["origin"];
+    const record = await baseline("baseline.regression", flowScientific(), { origin });
+    expect(record.origin).toEqual(origin);
+  });
+
+  it("refuses a calculated origin that does not hold together", async () => {
+    const control = {
+      channel: "A",
+      row: "control",
+      events: { fileName: "a.fcs", count: 100 },
+      negative: { fileName: "a.fcs", count: 100 },
+    };
+    const calculated = (overrides: Record<string, unknown>) =>
+      baseline("baseline.calculated-bad", flowScientific(), {
+        origin: {
+          type: "calculated",
+          estimator: "median-difference",
+          estimatorVersion: "1",
+          controls: [control],
+          ...overrides,
+        } as unknown as NewBaselineMetadata["origin"],
+      });
+    await expect(calculated({ estimator: "median difference" })).rejects.toThrow(/estimator must be/);
+    await expect(calculated({ estimatorVersion: "" })).rejects.toThrow(/estimatorVersion/);
+    await expect(calculated({ controls: [] })).rejects.toThrow(/lists 1 to/);
+    await expect(calculated({ controls: [control, { channel: "A", row: "none" }] })).rejects.toThrow(/channel twice/);
+    await expect(calculated({ controls: [{ channel: "A", row: "guess" }] })).rejects.toThrow(/unsupported row source/);
+    await expect(calculated({ controls: [{ row: "none" }] })).rejects.toThrow(/name its channel/);
+    await expect(calculated({ controls: [{ channel: "A", row: "none", events: control.events }] }))
+      .rejects.toThrow(/unexpected field/);
+    await expect(calculated({ controls: [{ channel: "A", row: "control" }] })).rejects.toThrow(/origin events must be an object/);
+    await expect(calculated({ controls: [{ ...control, negative: null }] })).rejects.toThrow(/negative events must be an object/);
+    await expect(calculated({ controls: [{ ...control, events: { fileName: "a.fcs", count: 1.5 } }] }))
+      .rejects.toThrow(/whole number of events/);
+    await expect(calculated({ controls: [{ ...control, events: { fileName: "a.fcs", count: 5, lower: Infinity } }] }))
+      .rejects.toThrow(/lower must be a finite number/);
+    await expect(calculated({ controls: [{ ...control, events: { fileName: " ", count: 5 } }] }))
+      .rejects.toThrow(/filename must not be blank/);
+    await expect(calculated({ surprise: true })).rejects.toThrow(/unexpected field/);
+  });
+
   it("creates a canonical immutable baseline with self-consistent hashes and provenance", async () => {
     const origin = uploadedOrigin({
       fileName: "  Reference QQ beads (2021-06-03), α β.CSV  ",

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { cellPanelLayout } from "../CellValuesChart";
 import { proportionPanelLayout } from "../ProportionsChart";
-import { labelWidths, leftForTurnedLabels, rotatedLabelsLeft } from "./chartLayout";
+import { labelsRotate, labelWidths, leftForTurnedLabels, rotatedLabelsLeft } from "./chartLayout";
 
 const REACH = Math.cos((35 * Math.PI) / 180);
 const files = (n: number) => Array.from({ length: n }, (_, i) => `D${(i % 3) + 1}_treated_long_sample_name_${String(i + 1).padStart(2, "0")}.fcs`);
@@ -73,5 +73,16 @@ describe("left margin for turned category labels", () => {
     const layout = cellPanelLayout("violin", ["A", "B"], ["0", "100K"], 9, 200);
     expect(layout.rotateLabels).toBe(false);
     expect(layout.margin.left).toBe(Math.max(48, Math.round(28 + 4 * 9 * 0.6)));
+  });
+
+  it("turns short group labels that would touch in a narrow panel, on the tab and on a Layout page", () => {
+    // Two groups in a 120 px proportions panel: each label is about 37 px in a 20 px slot.
+    const narrow = proportionPanelLayout("box", ["treated", "control"], 2, 9, 120);
+    expect(narrow.rotateLabels).toBe(true);
+    // The same labels with room between them stay level.
+    expect(proportionPanelLayout("box", ["treated", "control"], 2, 9, 200).rotateLabels).toBe(false);
+    // Labels a slot apart touch; labels with an empty slot between them do not.
+    expect(labelsRotate(35, 23, 40, [35, 35])).toBe(true);
+    expect(labelsRotate(35, 23, 40, [35, 0, 35, 0])).toBe(false);
   });
 });

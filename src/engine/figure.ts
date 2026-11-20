@@ -60,6 +60,12 @@ export interface FigurePlot {
   x: string;
   y: string;
   type: "biplot" | "histogram" | "heatmap" | "chart";
+  /**
+   * The channels of a summary heatmap plot (a column each) or a histogram plot (a panel each, as
+   * a plot of its own along the plots dimension), in this order; `x` is kept as the first of them
+   * for readers that know one channel. Absent means `x` alone. Ignored for the other types.
+   */
+  channels?: string[];
   /** What a plot of type "chart" draws; ignored for the other types. */
   chart?: FigureChart;
   population?: FigurePopulation;
@@ -437,13 +443,35 @@ export function migrateFigure(
   return captureFigureTransforms(figure, samples);
 }
 
+/**
+ * The channels a summary heatmap plot draws, a column each: its `channels`, or `x` alone. A
+ * figure that fails the schema makes its whole workspace unreadable, so `channels` is not checked
+ * there: anything in it that is not a channel name is passed over here instead.
+ */
+export function heatmapChannels(plot: Pick<FigurePlot, "x" | "channels">): string[] {
+  return plotChannelList(plot);
+}
+
+/** A histogram plot's channels, a panel each: its `channels`, or `x` alone; read as a heatmap's are. */
+export function histogramChannels(plot: Pick<FigurePlot, "x" | "channels">): string[] {
+  return plotChannelList(plot);
+}
+
+/** The id along the plots dimension of one channel of a histogram plot with several. */
+const PLOT_CHANNEL_SEPARATOR = "\u0000";
+
+function plotChannelList(plot: Pick<FigurePlot, "x" | "channels">): string[] {
+  const listed = Array.isArray(plot.channels) ? plot.channels.filter((key): key is string => typeof key === "string" && key !== "") : [];
+  return listed.length ? [...new Set(listed)] : plot.x ? [plot.x] : [];
+}
+
 export function captureFigureTransforms(
   figure: FigureSpec,
   samples: readonly FigureSample[],
 ): FigureSpec {
   const transforms = { ...figure.transforms };
   for (const key of new Set(
-    figure.plots.flatMap((p) => [p.x, ...(p.type === "biplot" ? [p.y] : [])]),
+    figure.plots.flatMap((p) => (p.type === "heatmap" ? heatmapChannels(p) : p.type === "histogram" ? histogramChannels(p) : [p.x, ...(p.type === "biplot" ? [p.y] : [])])),
   )) {
     const sample = samples.find(
       (s) => s.sample.index(key) !== undefined,
@@ -588,11 +616,14 @@ export function layoutFigure(
     ],
     [
       "plots",
-      figure.plots.map((p) => ({
-        dimension: "plots",
-        id: p.id,
-        label: p.name,
-      })),
+      // A histogram of several channels is a plot per channel along this dimension, named by the
+      // plot and the channel; every other plot is one value.
+      figure.plots.flatMap((p) => {
+        const channels = p.type === "histogram" ? histogramChannels(p) : [];
+        return channels.length > 1
+          ? channels.map((channel) => ({ dimension: "plots" as const, id: `${p.id}${PLOT_CHANNEL_SEPARATOR}${channel}`, label: `${p.name} · ${channel}` }))
+          : [{ dimension: "plots" as const, id: p.id, label: p.name }];
+      }),
     ],
   ]);
   const populationValue = (ref: FigurePopulation, field: string) =>
@@ -637,9 +668,12 @@ export function layoutFigure(
           const dimensions = [...page, ...row, ...column];
           const value = (name: string) =>
             dimensions.find((d) => d.dimension === name)?.id;
-          const plot =
-            figure.plots.find((p) => p.id === value("plots")) ??
+          // A histogram's channel rides in the plots value's id; the panel draws the plot at it.
+          const [plotId, plotChannel] = (value("plots") ?? "").split(PLOT_CHANNEL_SEPARATOR);
+          const listed =
+            figure.plots.find((p) => p.id === plotId) ??
             figure.plots[0];
+          const plot = plotChannel !== undefined ? { ...listed, x: plotChannel } : listed;
           const own = plot.together ? figure.populations : plot.populations?.length ? plot.populations : undefined;
           const population =
             own?.[0] ??
@@ -1043,7 +1077,9 @@ export function buildFigurePanel(
     /** The population's events in this file, for the pooled gate percentages. */
     count: number;
   }[] = [];
-  const summaryValues: number[] = [];
+  const summaryChannels = panel.plot.type === "heatmap" ? heatmapChannels(panel.plot) : [];
+  const summarySources: { source: FigureSource; mask: FigureSource["gating"]["masks"][string] }[] = [];
+  const missingChannels = new Set<number>();
   let totalCount = 0;
   const resolve = (source: FigureSource) => {
     const override =
@@ -1107,8 +1143,19 @@ export function buildFigurePanel(
       continue;
     }
     const { x, y, type } = panel.plot;
+    // A heatmap channel this file lacks is left blank in the panel's column (in every file of
+    // a pooled panel, so a column never summarises only some of them); the panel fails only
+    // when the file has none of its channels.
+    const present = type === "heatmap" ? summaryChannels.filter((key) => source.sample.index(key) !== undefined) : [];
+    if (type === "heatmap") {
+      summaryChannels.forEach((key, c) => {
+        if (source.sample.index(key) === undefined) missingChannels.add(c);
+      });
+    }
     if (
-      source.sample.index(x) === undefined ||
+      (type === "heatmap"
+        ? !present.length
+        : source.sample.index(x) === undefined) ||
       (type === "biplot" && source.sample.index(y) === undefined)
     )
       return {
@@ -1121,7 +1168,7 @@ export function buildFigurePanel(
       if (
         reference &&
         (source.sample.activeLayer !== reference.sample.activeLayer ||
-          [x, ...(type === "biplot" ? [y] : [])].some((key) => {
+          (type === "heatmap" ? present : [x, ...(type === "biplot" ? [y] : [])]).some((key) => {
             const a = source.sample.channels[source.sample.index(key)!],
               ri = reference.sample.index(key),
               b = ri === undefined ? undefined : reference.sample.channels[ri];
@@ -1144,11 +1191,7 @@ export function buildFigurePanel(
           problem: "Summary heatmaps require separate panels or pooled events",
           mappings,
         };
-      const column = source.sample.displayColumn(source.sample.index(x)!);
-      const mask = source.gating.masks[resolved.id];
-      for (let i = 0; i < column.length; i++)
-        if (mask[i] && Number.isFinite(column[i]))
-          summaryValues.push(column[i]);
+      summarySources.push({ source, mask: source.gating.masks[resolved.id] });
       continue;
     }
     // A pooled preview samples proportionally to the full membership, not equally per file. A
@@ -1203,18 +1246,43 @@ export function buildFigurePanel(
       count,
     });
   }
-  if (panel.plot.type === "heatmap")
+  if (panel.plot.type === "heatmap") {
+    const summarise = (values: number[]) =>
+      values.length
+        ? options.summaryStat === "mean"
+          ? values.reduce((a, b) => a + b, 0) / values.length
+          : exactMedian(values)
+        : null;
+    // One channel at a time, so a heatmap of many channels holds one channel's events at once.
+    const channelSummaries: (number | null)[] = [];
+    // A quantile sketch of the events, so the matrix can scale a channel by the percentiles
+    // of the events pooled over its rows without holding every event.
+    const channelQuantiles: number[][] = [];
+    summaryChannels.forEach((key, c) => {
+      if (missingChannels.has(c)) {
+        channelSummaries.push(null);
+        channelQuantiles.push([]);
+        return;
+      }
+      const values: number[] = [];
+      for (const { source, mask } of summarySources) {
+        const column = source.sample.displayColumn(source.sample.index(key)!);
+        for (let i = 0; i < column.length; i++)
+          if (mask[i] && Number.isFinite(column[i]))
+            values.push(column[i]);
+      }
+      channelSummaries.push(summarise(values));
+      channelQuantiles.push(quantileSketch(values, 101));
+    });
     return {
       mappings,
       config: {
-        figure_summary: summaryValues.length
-          ? options.summaryStat === "mean"
-            ? summaryValues.reduce((a, b) => a + b, 0) / summaryValues.length
-            : exactMedian(summaryValues)
-          : null,
-        // A quantile sketch of the events, so the matrix can scale a channel by the percentiles
-        // of the events pooled over its rows without holding every event.
-        summary_quantiles: quantileSketch(summaryValues, 101),
+        // The first channel's, as a one-channel plot carried them before `channels`.
+        figure_summary: channelSummaries[0] ?? null,
+        summary_quantiles: channelQuantiles[0] ?? [],
+        summary_channels: summaryChannels,
+        channel_summaries: channelSummaries,
+        channel_quantiles: channelQuantiles,
         n_events: totalCount,
         x_label: panel.plot.name,
         x: [],
@@ -1222,6 +1290,7 @@ export function buildFigurePanel(
         summary_stat: options.summaryStat ?? "median",
       },
     };
+  }
   if (!results.length) return { config: null, omitted: true, mappings };
   const first = results[0];
   const colors = [

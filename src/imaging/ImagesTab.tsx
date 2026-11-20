@@ -557,7 +557,7 @@ function ImagesTabImpl({
               </span>
             )}
             <span className="gl-images-count">
-              {t("{count} cells in {population} · {shown} with images", {
+              {t(inPopulation === 1 ? "1 cell in {population} · {shown} with images" : "{count} cells in {population} · {shown} with images", {
                 count: inPopulation.toLocaleString(),
                 population: wallLabel,
                 shown: events.length.toLocaleString(),
