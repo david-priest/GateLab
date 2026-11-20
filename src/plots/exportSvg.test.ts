@@ -2,8 +2,8 @@
 // What every SVG export shares once composed: physical units, one font, named groups, SVG 1.1
 // image references, no hidden or empty nodes; and the PNG resolution chunk.
 
-import { describe, expect, it } from "vitest";
-import { crc32, eightBitPngImages, exportId, finishExportSvg, nameCell, pngBitDepth, pngWithResolution, slugId } from "./exportSvg";
+import { describe, expect, it, vi } from "vitest";
+import { crc32, eightBitPngImages, exportId, finishExportSvg, largeImagesByObjectUrl, nameCell, pngBitDepth, pngWithResolution, restartPdfPage, slugId } from "./exportSvg";
 import { SCREEN_PX_PER_MM } from "../engine/layout";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -182,5 +182,71 @@ describe("16-bit PNG images before the PDF writer", () => {
     const changed = await eightBitPngImages(root, () => Promise.reject(new Error("decode")));
     expect(changed).toBe(0);
     expect(root.querySelector("image")!.getAttribute("href")).toBe(PNG16);
+  });
+});
+
+describe("a PDF page the writer stopped on", () => {
+  it("is blank again, at its size and in the document's own coordinates, for the image drawn in its place", async () => {
+    const { jsPDF } = await import("jspdf");
+    const pdf = new jsPDF({ unit: "pt", format: [400, 300], orientation: "landscape" });
+    pdf.addPage([200, 500], "portrait");
+    // As the writer leaves a page it stops on: its own mode, a graphics state open, half a drawing.
+    pdf.advancedAPI();
+    pdf.saveGraphicsState();
+    pdf.rect(10, 10, 50, 50, "F");
+    restartPdfPage(pdf);
+    expect(pdf.isAdvancedAPI()).toBe(false);
+    expect(pdf.getNumberOfPages()).toBe(2);
+    expect(pdf.getCurrentPageInfo().pageNumber).toBe(2);
+    expect([pdf.internal.pageSize.getWidth(), pdf.internal.pageSize.getHeight()]).toEqual([200, 500]);
+    const written = pdf.output();
+    expect(written).not.toMatch(/ re\n/);
+    expect(written.match(/^q$/gm) ?? []).toHaveLength((written.match(/^Q$/gm) ?? []).length);
+  });
+});
+
+describe("large images for the PDF writer", () => {
+  const PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP4z8AARAwQCgAf7gP9i18U1AAAAABJRU5ErkJggg==";
+
+  it("hands an image over the limit by object URL ending in its type, and puts the data URI back", async () => {
+    const root = new DOMParser().parseFromString(
+      `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">` +
+        `<image id="a" href="${PNG}"/><image id="b" xlink:href="${PNG}"/><image id="c" href="data:image/svg+xml;base64,${"A".repeat(200)}"/></svg>`,
+      "image/svg+xml",
+    ).documentElement;
+    const made: Blob[] = [], revoked: string[] = [];
+    const create = URL.createObjectURL, revoke = URL.revokeObjectURL;
+    URL.createObjectURL = (blob: Blob | MediaSource) => { made.push(blob as Blob); return `blob:test/${made.length}`; };
+    URL.revokeObjectURL = (url: string) => { revoked.push(url); };
+    const href = (id: string) => {
+      const image = root.querySelector(`#${id}`)!;
+      return image.getAttribute("href") ?? image.getAttribute("xlink:href");
+    };
+    try {
+      const restore = await largeImagesByObjectUrl(root, 100);
+      expect([href("a"), href("b")]).toEqual(["blob:test/1#.png", "blob:test/2#.png"]);
+      expect(href("c")).toMatch(/^data:image\/svg\+xml/);
+      expect(made.map((blob) => blob.size)).toEqual([73, 73]);
+      restore();
+      expect([href("a"), href("b")]).toEqual([PNG, PNG]);
+      expect(revoked).toEqual(["blob:test/1", "blob:test/2"]);
+    } finally {
+      URL.createObjectURL = create;
+      URL.revokeObjectURL = revoke;
+    }
+  });
+
+  it("leaves a small image as its data URI", async () => {
+    const root = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg"><image href="${PNG}"/></svg>`, "image/svg+xml").documentElement;
+    const create = vi.fn();
+    const original = URL.createObjectURL;
+    URL.createObjectURL = create;
+    try {
+      (await largeImagesByObjectUrl(root))();
+    } finally {
+      URL.createObjectURL = original;
+    }
+    expect(create).not.toHaveBeenCalled();
+    expect(root.querySelector("image")!.getAttribute("href")).toBe(PNG);
   });
 });

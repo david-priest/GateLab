@@ -62,3 +62,44 @@ export function installShim(): PlotBus {
   };
   return installed;
 }
+
+/** The two Shiny methods a plot script calls, as a script given this bus instead of `window.Shiny` sees them. */
+export interface PlotShim {
+  addCustomMessageHandler(name: string, fn: MessageHandler): void;
+  setInputValue(name: string, value: any, opts?: unknown): void;
+}
+
+/**
+ * A bus of its own for one more copy of a plot script. The page's `window.Shiny` (installShim) is
+ * one bus shared by everything evaluated against it; a second copy of the gating plot given that
+ * bus would answer the first copy's messages and report its events as the first copy's.
+ */
+export function createPlotBus(): { shim: PlotShim; bus: PlotBus } {
+  const handlers: Record<string, MessageHandler> = {};
+  const listeners: Record<string, InputListener[]> = {};
+  return {
+    shim: {
+      addCustomMessageHandler(name, fn) {
+        handlers[name] = fn;
+      },
+      setInputValue(name, value) {
+        const ls = listeners[name];
+        if (ls) for (const cb of ls) cb(value);
+      },
+    },
+    bus: {
+      send(name, payload) {
+        handlers[name]?.(payload);
+      },
+      on(name, cb) {
+        (listeners[name] ||= []).push(cb);
+        return () => {
+          listeners[name] = (listeners[name] || []).filter((f) => f !== cb);
+        };
+      },
+      has(name) {
+        return name in handlers;
+      },
+    },
+  };
+}

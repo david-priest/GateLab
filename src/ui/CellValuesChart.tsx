@@ -22,7 +22,7 @@ import { cellMarkN, cellMarkNWithUnits, ChartNRow, nRowSize } from "./chart/char
 import { ChartCategoryAxis, ChartHorizontalValueAxis, ChartValueAxis } from "./chart/ChartAxis";
 import { ChartPanel } from "./chart/ChartPanel";
 import { ChartHighlightNote, ChartLegend, chartLegendColumns } from "./chart/ChartLegend";
-import { PROPORTIONS_NO_FACTOR, PROPORTIONS_SAMPLE_FACTOR, type ProportionsSettings } from "../engine/proportionsSettings";
+import { DEFAULT_RIDGELINE_STYLE, PROPORTIONS_NO_FACTOR, PROPORTIONS_SAMPLE_FACTOR, type ProportionsSettings, type RidgelineStyle } from "../engine/proportionsSettings";
 import { arrangePanels, chartPageDimension, chartPanelDimensions, headedPanelTitle, pagePanels, panelDimensionText, placedOrOnly, type PanelTitles } from "./panelArrangement";
 import { chartGridCells } from "./chart/ChartPanelGrid";
 import type { LayoutProportionsPanel } from "../engine/layout";
@@ -88,6 +88,8 @@ export interface CellValuesChartProps {
    * within the channel; unset or one, the chart draws `model` on `axis` with `replicates`.
    */
   channels?: readonly CellChannelPart[];
+  /** How ridgelines are drawn: overlap, fill, outline and where the rows' labels go; unset, DEFAULT_RIDGELINE_STYLE. */
+  ridgeline?: RidgelineStyle;
 }
 
 /** One channel of a chart of several: its cells, its value axis and its replicate marks. */
@@ -158,17 +160,21 @@ export function splitsViolins(groupCount: number, xAxis: ChartXAxis): boolean {
   return groupCount === 2 && xAxis === "groups";
 }
 
-/** How far each ridge overlaps the row above it, as the Illustration's ridgeline layout sets by default. */
-export const RIDGE_OVERLAP = 0.7;
+/** How far each ridge overlaps the row above it by default, as the Illustration's ridgeline layout sets by default. */
+export const RIDGE_OVERLAP = DEFAULT_RIDGELINE_STYLE.overlap;
+
+/** A ridgeline panel's left margin where its rows' labels are left to the first panel of its row. */
+export const UNLABELLED_RIDGE_LEFT = 8;
 
 /**
  * A ridgeline panel's rows within its plot: each ridge's height and each row's baseline, the
- * first row at the top. The rows overlap by RIDGE_OVERLAP, as the Illustration's ridgelines do,
- * and the lowest baseline is the plot's bottom, so no ridge reaches beyond the plot.
+ * first row at the top. The rows overlap by `overlap` (RIDGE_OVERLAP, as the Illustration's
+ * ridgelines do, unless set), and the lowest baseline is the plot's bottom, so no ridge reaches
+ * beyond the plot.
  */
-export function ridgelineRows(rows: number, plotTop: number, plotHeight: number): { ridgeHeight: number; baselines: number[] } {
-  const ridgeHeight = plotHeight / (1 + Math.max(0, rows - 1) * (1 - RIDGE_OVERLAP));
-  const step = ridgeHeight * (1 - RIDGE_OVERLAP);
+export function ridgelineRows(rows: number, plotTop: number, plotHeight: number, overlap = RIDGE_OVERLAP): { ridgeHeight: number; baselines: number[] } {
+  const ridgeHeight = plotHeight / (1 + Math.max(0, rows - 1) * (1 - overlap));
+  const step = ridgeHeight * (1 - overlap);
   return { ridgeHeight, baselines: Array.from({ length: rows }, (_, r) => plotTop + ridgeHeight + r * step) };
 }
 
@@ -308,7 +314,7 @@ export function cellPanelLayout(
   let innerWidth = innerAt(margin.left);
   const step = labels.length ? innerWidth / labels.length : innerWidth;
   const longestLabelPx = longestLabelWidth(labels, tickFont, 30);
-  const rotateLabels = labelsRotate(longestLabelPx, step, 40);
+  const rotateLabels = labelsRotate(longestLabelPx, step, 40, labelWidths(labels, tickFont, 30));
   if (rotateLabels) {
     margin.bottom = rotatedLabelsBottom(longestLabelPx, 60);
     // The first labels, turned, reach left past the plot; the margin makes room for them.
@@ -519,6 +525,7 @@ export function CellValuesChart({
   axisOptions,
   replicates,
   channels,
+  ridgeline = DEFAULT_RIDGELINE_STYLE,
 }: CellValuesChartProps) {
   const { t } = useI18n();
   const [hoveredLegend, setHoveredLegend] = useState<number | null>(null);
@@ -617,18 +624,32 @@ export function CellValuesChart({
     return `${model.catLevels[violin.cat]} · ${violin.group}${violin.facet !== null && model.hasFacet ? ` · ${violin.facet}` : ""}: ${n.toLocaleString("en-US")} ${n === 1 ? "cell" : "cells"} from ${violin.files.length} ${violin.files.length === 1 ? "file" : "files"}, median ${formatMeasured(median)}`;
   };
 
+  // With the rows' labels on the first panel of each row of panels only, a panel further along the
+  // row leaves them out when its rows are the first panel's, the same labels in the same order.
+  const slotNames = (panel: CellPanel) => panel.slots.map((slot) => slot.tick ?? slot.label).join("\u0000");
+  const ridgeLabelled = (panel: CellPanel): boolean => {
+    if (drawnType !== "ridgeline" || ridgeline.labels !== "first" || only || placed.columns < 2) return true;
+    const at = placed.cells.indexOf(panel);
+    if (at < 0) return true;
+    const rowStart = at - (at % placed.columns);
+    const first = placed.cells.slice(rowStart, at).find((cell): cell is CellPanel => cell !== null);
+    return !first || slotNames(first) !== slotNames(panel);
+  };
+
   // Ridgelines: a row per slot, top to bottom in the chart's order, each a density of the channel
   // along the value axis, which runs along the bottom; the rows overlap as the Illustration's do.
   const renderRidgelines = (panel: CellPanel) => {
     const { model, toDisplay, replicateFrame } = channelOf(panel);
-    const M = layout.margin;
-    const iw = layout.width - M.left - M.right;
+    const labelled = ridgeLabelled(panel);
+    const M = labelled ? layout.margin : { ...layout.margin, left: UNLABELLED_RIDGE_LEFT };
+    const iw = layout.width - layout.margin.left - layout.margin.right;
     const plotBottom = M.top + ih;
     const panelAxis = panelAxes?.[panels.indexOf(panel)] ?? axis;
     const [lo, hi] = panelAxis.range;
     const x = (v: number) => M.left + (iw * ((panelAxis.clip ? v : Math.min(hi, Math.max(lo, v))) - lo)) / (hi - lo);
     const inRange = (v: number) => panelAxis.clip || (v >= lo && v <= hi);
-    const { ridgeHeight, baselines } = ridgelineRows(panel.slots.length, M.top, ih);
+    const { ridgeHeight, baselines } = ridgelineRows(panel.slots.length, M.top, ih, ridgeline.overlap);
+    const outlineColour = (colour: string) => (ridgeline.outline === "black" ? "#111827" : ridgeline.outline === "none" ? null : colour);
     const ridges: JSX.Element[] = [];
     const points: JSX.Element[] = [];
     panel.slots.forEach((slot, si) => {
@@ -642,12 +663,14 @@ export function CellValuesChart({
       const marks: JSX.Element[] = [];
       if (kept.length > 1) {
         const top = kept.map((p) => `${x(p.v).toFixed(2)},${(baseline - p.w * ridgeHeight).toFixed(2)}`);
+        // Unfilled, the area is still drawn, transparent, so the ridge keeps its tooltip and its legend highlight.
+        const stroke = outlineColour(colour);
         marks.push(
-          <path key="r" className="gl-prop-mark" d={`M${x(kept[0].v).toFixed(2)},${baseline.toFixed(2)}L${top.join("L")}L${x(kept[kept.length - 1].v).toFixed(2)},${baseline.toFixed(2)}Z`} fill={colour} fillOpacity={0.85} stroke="none">
+          <path key="r" className="gl-prop-mark" d={`M${x(kept[0].v).toFixed(2)},${baseline.toFixed(2)}L${top.join("L")}L${x(kept[kept.length - 1].v).toFixed(2)},${baseline.toFixed(2)}Z`} fill={ridgeline.fill ? colour : "#fff"} fillOpacity={ridgeline.fill ? ridgeline.fillOpacity : 0} stroke="none">
             <title>{tip}</title>
           </path>,
-          <path key="l" d={`M${top.join("L")}`} fill="none" stroke={colour} strokeWidth={1} strokeLinejoin="round" />,
         );
+        if (stroke) marks.push(<path key="l" d={`M${top.join("L")}`} fill="none" stroke={stroke} strokeWidth={ridgeline.outlineWidth} strokeLinejoin="round" />);
       } else if (!(shape.outline && shape.outline.at.length > 1)) {
         // A single value, or cells all alike: a line up from the row's baseline at the value.
         marks.push(
@@ -685,7 +708,7 @@ export function CellValuesChart({
     return (
       <ChartPanel
         key={panel.key}
-        width={layout.width}
+        width={M.left + iw + M.right}
         height={plotBottom + M.bottom}
         title={panelTitle(panel)}
         titleFont={fonts.title ?? fonts.axis}
@@ -708,7 +731,7 @@ export function CellValuesChart({
           {ridges}
           {points}
         </ChartPlotMarks>
-        {panel.slots.map((slot, si) => (
+        {labelled && panel.slots.map((slot, si) => (
           <text key={`y${si}`} x={M.left - 6} y={baselines[si] - 2} textAnchor="end" fontSize={fonts.tick} fill="#334155">
             <title>{slot.tick ?? slot.label}</title>
             {compactChartLabel(slot.tick ?? slot.label)}
@@ -872,7 +895,10 @@ export function CellValuesChart({
     );
   };
 
-  const grid = chartGridCells(placed, renderPanel, { font: fonts.title ?? fonts.axis, panelWidth: layout.width, panelHeight: layout.margin.top + ih + layout.margin.bottom });
+  // A column heading is as wide as the column's panels: narrower past the first column where ridgelines leave out their rows' labels.
+  const unlabelledWidth = layout.width - (layout.margin.left - UNLABELLED_RIDGE_LEFT);
+  const columnWidth = (column: number) => (column > 0 && drawnType === "ridgeline" && ridgeline.labels === "first" ? unlabelledWidth : layout.width);
+  const grid = chartGridCells(placed, renderPanel, { font: fonts.title ?? fonts.axis, panelWidth: layout.width, columnWidth, panelHeight: layout.margin.top + ih + layout.margin.bottom });
 
   return (
     <div

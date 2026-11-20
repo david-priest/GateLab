@@ -111,6 +111,9 @@ function fixture(fsc: Record<string, number[]> = { D1: [10, 90, 90, 10], D2: [10
 
 const openSection = (name: string) =>
   act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === name)!.click());
+/** Show one plot by its tab over the preview: the preview and the Plots section then hold that plot alone. */
+const showPlot = (name: string) =>
+  act(() => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="Plots"] [role="tab"]')].find((b) => b.textContent === name)!.click());
 const typePickers = () =>
   [...host.querySelectorAll<HTMLLabelElement>(".gl-figure-plot-editor label")].filter((l) => l.firstChild?.textContent?.trim() === "Type").map((l) => l.querySelector("select")!);
 const choose = (select: HTMLSelectElement, value: string) =>
@@ -125,24 +128,28 @@ describe("Illustration: chart plots", () => {
     fx.props.configRef.current!.figure!.plots[1] = { id: "two", name: "Two", x: "FSC-A", y: "SSC-A", type: "biplot" };
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    openSection("Plots");
-    const editor = () => host.querySelectorAll<HTMLElement>(".gl-figure-plot-editor")[1];
-    expect([...typePickers()[1].options].map((o) => o.textContent)).toEqual([
+    openSection("Plot");
+    // The Plots section holds the shown plot's editor alone, so Two's tab is clicked first.
+    showPlot("Two");
+    await flush();
+    const editor = () => host.querySelectorAll<HTMLElement>(".gl-figure-plot-editor")[0];
+    expect(host.querySelectorAll(".gl-figure-plot-editor")).toHaveLength(1);
+    expect([...typePickers()[0].options].map((o) => o.textContent)).toEqual([
       "Biplot", "Histogram", "Summary heatmap", "Violin", "Boxplot", "Statistic per file", "Composition",
     ]);
     const figure = () => fx.props.configRef.current!.figure!;
-    choose(typePickers()[1], "chart:violin");
+    choose(typePickers()[0], "chart:violin");
     await flush();
     expect(figure().plots[1]).toMatchObject({ type: "chart", chart: { valueKind: "cells", plotType: "violin" } });
     expect(editor().textContent).toContain("Median and quartiles inside");
     expect(editor().textContent).toContain("Show population labels");
     expect(editor().textContent).toContain("Channel");
     expect(editor().textContent).not.toContain("Y channel");
-    choose(typePickers()[1], "chart:statistic");
+    choose(typePickers()[0], "chart:statistic");
     await flush();
     expect(figure().plots[1].chart).toEqual({ valueKind: "statistic", plotType: "box" });
     expect(editor().querySelector('select[aria-label="Statistic"]')).not.toBeNull();
-    choose(typePickers()[1], "chart:proportion");
+    choose(typePickers()[0], "chart:proportion");
     await flush();
     expect(figure().plots[1].chart).toEqual({ valueKind: "proportion", plotType: "stacked" });
     expect(editor().textContent).not.toContain("Channel");
@@ -153,7 +160,7 @@ describe("Illustration: chart plots", () => {
     await flush();
     expect(editor().querySelector('[aria-label="Populations · Two"]')).not.toBeNull();
     // Back to a histogram drops the chart.
-    choose(typePickers()[1], "histogram");
+    choose(typePickers()[0], "histogram");
     await flush();
     expect(figure().plots[1].type).toBe("histogram");
     expect(figure().plots[1].chart).toBeUndefined();
@@ -165,32 +172,44 @@ describe("Illustration: chart plots", () => {
     fx.props.configRef.current!.figure!.plots[1] = { id: "two", name: "Two", x: "FSC-A", y: "SSC-A", type: "chart", chart: { valueKind: "cells", plotType: "violin", ...carried } };
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    openSection("Plots");
+    openSection("Plot");
+    showPlot("Two");
+    await flush();
     const figure = () => fx.props.configRef.current!.figure!;
-    choose(typePickers()[1], "chart:statistic");
+    choose(typePickers()[0], "chart:statistic");
     await flush();
     expect(figure().plots[1].chart).toEqual({ valueKind: "statistic", plotType: "box", ...carried });
-    choose(typePickers()[1], "chart:box");
+    choose(typePickers()[0], "chart:box");
     await flush();
     expect(figure().plots[1].chart).toEqual({ valueKind: "cells", plotType: "box", ...carried });
   });
 
-  it("draws the violin row under the histogram row, each file's chart in its histogram's column at the same width, and exports it as vector", async () => {
+  it("draws the violin plot's row in the histogram plot's columns at the same width, each file's chart where its histogram is, and exports it as vector", async () => {
     const fx = fixture();
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    const rows = [...host.querySelectorAll<HTMLTableRowElement>("#figure-preview-grid tbody tr")];
-    expect(rows).toHaveLength(2);
-    const cells = rows.map((row) => [...row.querySelectorAll<HTMLElement>("td[data-figure-panel]")]);
-    expect(cells.map((row) => row.length)).toEqual([2, 2]);
+    // One plot is shown at a time, so each plot's row is read with its own tab shown; the two rows
+    // composed one under the other are drawn on the Layout tab, not here.
+    const previewRow = () => {
+      const rows = [...host.querySelectorAll<HTMLTableRowElement>("#figure-preview-grid tbody tr")];
+      expect(rows).toHaveLength(1);
+      return [...rows[0].querySelectorAll<HTMLElement>("td[data-figure-panel]")];
+    };
+    const fileOf = (cell: HTMLElement) => JSON.parse(cell.dataset.figurePanel!).find((v: { dimension: string }) => v.dimension === "samples");
+    const histogramCells = previewRow();
+    expect(histogramCells).toHaveLength(2);
+    const histograms = histogramCells.map((cell) => ({ file: fileOf(cell), width: cell.querySelector<HTMLElement>(".mini-plot-cell")!.style.width }));
+    expect(histograms.map((h) => h.width)).toEqual(["260px", "260px"]);
+    showPlot("FSC violin");
+    await flush();
+    const chartCells = previewRow();
+    expect(chartCells).toHaveLength(2);
     for (let column = 0; column < 2; column++) {
-      const histogram = cells[0][column].querySelector<HTMLElement>(".mini-plot-cell")!;
-      const chart = cells[1][column].querySelector<HTMLElement>(".gl-figure-chart")!;
-      expect(histogram).not.toBeNull();
+      const chart = chartCells[column].querySelector<HTMLElement>(".gl-figure-chart")!;
       expect(chart).not.toBeNull();
-      // The same file heads both: the column's panels draw it.
-      expect(JSON.parse(cells[1][column].dataset.figurePanel!)).toContainEqual(JSON.parse(cells[0][column].dataset.figurePanel!).find((v: { dimension: string }) => v.dimension === "samples"));
-      expect(chart.style.width).toBe(histogram.style.width);
+      // The same file heads the column in both plots.
+      expect(JSON.parse(chartCells[column].dataset.figurePanel!)).toContainEqual(histograms[column].file);
+      expect(chart.style.width).toBe(histograms[column].width);
       expect(chart.style.width).toBe("260px");
       const svg = chart.querySelector("svg.gl-prop-panel")!;
       expect(svg.getAttribute("width")).toBe("260");
@@ -209,6 +228,8 @@ describe("Illustration: chart plots", () => {
     fx.props.configRef.current!.figure!.plots[1].chart = { valueKind: "cells", plotType: "box", populationLabels: false };
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
+    showPlot("FSC violin");
+    await flush();
     const svg = host.querySelector(".gl-figure-chart svg.gl-prop-panel")!;
     expect([...svg.querySelectorAll("text title")].map((t) => t.textContent)).toEqual(["", "", "", ""]);
   });
@@ -224,6 +245,8 @@ describe("Illustration: chart plots", () => {
       );
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
+    showPlot("FSC violin");
+    await flush();
     // D1's medians reach 90 and D2's 900: both panels on the axis that holds 900.
     expect(topTicks()).toEqual(["1,000", "1,000"]);
     act(() => root.unmount());
@@ -231,28 +254,44 @@ describe("Illustration: chart plots", () => {
     fx.props.configRef.current!.figure!.scalePolicy = "individual";
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
+    showPlot("FSC violin");
+    await flush();
     expect(topTicks()).toEqual(["100", "1,000"]);
   });
 
-  it("sends each chart panel to the Layout tab as a Plotting block of one panel, in its cell under its histogram", async () => {
+  it("sends each chart panel to the Layout tab as a Plotting block of one panel, in its file's column as its histogram is", async () => {
     const fx = fixture();
     const onAddToLayout = vi.fn();
     act(() => root.render(<IllustrationTab {...fx.props} onAddToLayout={onAddToLayout} />));
     await flush();
     openSection("Export");
-    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add panels to Layout")!.click());
-    const [recipes, cells, , panelSize] = onAddToLayout.mock.calls[0];
-    expect(panelSize).toBe(260);
-    const placed = recipes.map((recipe: { kind: string; sampleId?: string; settings?: { files: string[] } }, i: number) => [
-      recipe.kind, recipe.sampleId ?? recipe.settings!.files.join(), cells[i].row, cells[i].column,
-    ]);
-    expect(placed).toEqual([
+    const addPanels = () => act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add panels to Layout")!.click());
+    const placedOf = (call: number) => {
+      const [recipes, cells, , panelSize] = onAddToLayout.mock.calls[call];
+      expect(panelSize).toBe(260);
+      return {
+        recipes,
+        placed: recipes.map((recipe: { kind: string; sampleId?: string; settings?: { files: string[] } }, i: number) => [
+          recipe.kind, recipe.sampleId ?? recipe.settings!.files.join(), cells[i].row, cells[i].column,
+        ]),
+      };
+    };
+    // "Add panels to Layout" takes the shown plot's panels, so each plot is sent from its own tab;
+    // a chart row under a histogram row is composed on the Layout tab from the whole figure.
+    addPanels();
+    expect(placedOf(0).placed).toEqual([
       ["histogram", "D1", 0, 0],
       ["histogram", "D2", 0, 1],
-      ["proportions", "D1", 1, 0],
-      ["proportions", "D2", 1, 1],
     ]);
-    const chart = recipes[2];
+    showPlot("FSC violin");
+    await flush();
+    addPanels();
+    const { recipes, placed } = placedOf(1);
+    expect(placed).toEqual([
+      ["proportions", "D1", 0, 0],
+      ["proportions", "D2", 0, 1],
+    ]);
+    const chart = recipes[0];
     expect(chart.panel).toEqual({});
     expect(chart.settings).toMatchObject({
       valueKind: "cells",
@@ -276,6 +315,8 @@ describe("Illustration: chart plots", () => {
   async function sentBlocks(fx: ReturnType<typeof fixture>) {
     const onAddToLayout = vi.fn();
     act(() => root.render(<IllustrationTab {...fx.props} onAddToLayout={onAddToLayout} />));
+    await flush();
+    showPlot("FSC violin");
     await flush();
     const drawn = [...host.querySelectorAll<SVGSVGElement>(".gl-figure-chart svg.gl-prop-panel")].map(tickValues);
     openSection("Export");
@@ -331,17 +372,21 @@ describe("Illustration: chart plots", () => {
     fx.props.configRef.current!.figure!.plots[1] = { id: "two", name: "Two", x: "SSC-A", y: "FSC-A", type: "biplot" };
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    openSection("Plots");
+    openSection("Plot");
+    showPlot("Two");
+    await flush();
     const figure = () => fx.props.configRef.current!.figure!;
     // A plot on a measured channel keeps it.
-    choose(typePickers()[1], "chart:statistic");
+    choose(typePickers()[0], "chart:statistic");
     await flush();
     expect(figure().plots[1]).toMatchObject({ type: "chart", x: "SSC-A" });
-    // A plot added here starts on the files' first channel, Time.
+    // A plot added here starts on the files' first channel, Time, and is the plot shown, so its
+    // editor is the one in Plots.
     act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add plot")!.click());
     await flush();
     expect(figure().plots[2].x).toBe("Time");
-    choose(typePickers()[2], "chart:violin");
+    expect(host.querySelector<HTMLInputElement>(".gl-figure-plot-editor input")!.value).toBe(figure().plots[2].name);
+    choose(typePickers()[0], "chart:violin");
     await flush();
     expect(figure().plots[2]).toMatchObject({ type: "chart", x: "FSC-A" });
   });

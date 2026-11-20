@@ -57,6 +57,9 @@ describe("default object names", () => {
     expect(defaultObjectName(item("a", 0, text("Day 7")), naming)).toBe("Day 7");
     expect(defaultObjectName(item("a", 0, text("   ")), naming)).toBe("Text");
     expect(defaultObjectName(item("a", 0, { kind: "text", text: "B", fontSize: 16, letterFor: "p" }), naming)).toBe("Panel letter B");
+    const panel = (count: number) => ({ kind: "cellpanel", sampleId: "D1", fileName: "Sample 1.fcs", cells: Array.from({ length: count }, (_, event) => ({ event, label: String(event) })), columns: [], display: [], exposure: 1, tile: 40 }) as LayoutRecipe;
+    expect(defaultObjectName(item("a", 0, panel(1)), naming)).toBe("1 cell · Sample 1.fcs");
+    expect(defaultObjectName(item("a", 0, panel(3)), naming)).toBe("3 cells · Sample 1.fcs");
   });
 
   it("gives each kind a short word, a panel letter its own", () => {

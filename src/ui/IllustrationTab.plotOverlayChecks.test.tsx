@@ -150,7 +150,7 @@ describe("Illustration: a ticked overlay population that is no longer listed", (
   const row = (label: string) => [...checklist().querySelectorAll("label")].find((l) => l.querySelector(".gl-strategy-pop-name")?.textContent === label);
   async function openPlots() {
     await flush();
-    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Plots")!.click());
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Plot")!.click());
     await flush();
   }
 

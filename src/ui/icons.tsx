@@ -275,6 +275,18 @@ export function ZoomInIcon() {
   );
 }
 
+/** Add a plot — a plot's frame with a plus beside it. */
+export function AddPlotIcon() {
+  return (
+    <svg {...base} width={15} height={15} strokeWidth={1.15} className="gl-icon-light">
+      <path d="M2 2.5v8.5h8.5" />
+      <path d="M12.2 2v4.4M10 4.2h4.4" />
+      <circle cx="5.4" cy="7.2" r="0.9" />
+      <circle cx="7.8" cy="5.2" r="0.9" />
+    </svg>
+  );
+}
+
 /** Zoom out — a magnifier with a minus, as light as Zoom in. */
 export function ZoomOutIcon() {
   return (

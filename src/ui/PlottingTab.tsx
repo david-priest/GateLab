@@ -5,7 +5,7 @@
 // Facet come from per-sample metadata (or the sample name). Rendered as a custom SVG stacked bar
 // (composition per Group) or boxplot (per-unit fraction per Category, dodged by Group).
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { finishExportSvg, pdfVectorPage, pngBlob } from "../plots/exportSvg";
 import { usePersistedTabState } from "./tabState";
 import type { CoreState, Derived } from "../store";
@@ -19,7 +19,11 @@ import type { MetadataColumn } from "../engine/metadata";
 import { SAMPLE_ID_FIELD } from "../engine/metadata";
 import { useI18n } from "./i18n";
 import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
+import { PlottingHeatmap } from "./PlottingHeatmap";
+import { heatmapDataTable } from "./plottingHeatmapModel";
+import type { HeatmapMatrix } from "../engine/figureHeatmap";
 import { NumberField } from "./NumberField";
+import { ChartResizeHandle, type ChartSize } from "./chart/ChartResizeHandle";
 import { FigureStyleFollow, useFigureStyle } from "./figureStyle";
 import { figureHierarchies } from "../engine/figure";
 import {
@@ -29,7 +33,7 @@ import {
   type ProportionsModel,
   type ProportionsSettings,
 } from "../engine/proportionsModel";
-import { BASE_PROPORTIONS_SETTINGS, consistentPlotType, normalizePanelWidth, PLOT_TYPES_BY_VALUE, PROPORTIONS_NO_FACTOR, PROPORTIONS_SAMPLE_FACTOR } from "../engine/proportionsSettings";
+import { BASE_PROPORTIONS_SETTINGS, consistentPlotType, DEFAULT_RIDGELINE_STYLE, normalizePanelWidth, normalizeRidgelineStyle, PLOT_TYPES_BY_VALUE, PROPORTIONS_NO_FACTOR, PROPORTIONS_SAMPLE_FACTOR, RIDGELINE_RANGES, type RidgelineStyle } from "../engine/proportionsSettings";
 import { buildCellValuesModel } from "../engine/cellValuesModel";
 import { CellValuesChart, cellChartAxis, cellPlotType, splitsViolins, type CellChannelPart } from "./CellValuesChart";
 import { sharesValueAxis, valueAxisOptions } from "./chart/valueAxis";
@@ -38,14 +42,17 @@ import { StatisticChart } from "./StatisticChart";
 import { cellsDataTable, channelsDataTable, plottingDataTableCsv, proportionsDataTable, statisticDataTable } from "./plottingData";
 import { PlottingDataTableView } from "./PlottingDataTableView";
 import { FoldSummary } from "./FoldSummary";
+import { ChannelChecklist } from "./ChannelChecklist";
 import { FileChecklist } from "./FileChecklist";
 import { PopulationChecklist } from "./PopulationChecklist";
 import { plottingPages, plottingPanelBlocks, type PlottingPanelBlock } from "./plottingPanels";
 import { panelDimensionText } from "./panelArrangement";
 import type { LayoutProportionsPanel } from "../engine/layout";
-import { DimensionShelves } from "./DimensionShelves";
+import { movedAlong, PanelLayoutControl, panelLayoutSummary } from "./PanelLayoutControl";
 import { useEveryPageMenu } from "./layoutHandoff/useEveryPageMenu";
-import { chartShelfAllowed, chartShelves, chartDimensionMovable, placeChartDimension, type ChartDimension, type ChartShelf } from "./plottingShelves";
+import { ContextMenu, type ContextMenuState } from "./ContextMenu";
+import type { MenuEntry } from "./MenuButton";
+import { chartShelfAllowed, chartShelves, placeChartDimension, type ChartDimension, type ChartShelf } from "./plottingShelves";
 import { composeProportionsChartSvg, divisionWithinName, ProportionsChart, proportionsFactorTitle, proportionsValueTitle } from "./ProportionsChart";
 
 // The chart moved to ProportionsChart.tsx and its label format to chart/chartFormat.ts; their
@@ -81,6 +88,10 @@ interface Props {
   onConfigChange?: () => void;
   /** Put the chart as it is now on the Layout tab, as one block that keeps these settings; with pages, `panel` names the page shown. */
   onAddToLayout?: (settings: ProportionsSettings, panel?: LayoutProportionsPanel) => void;
+  /** The files checked in the file list, which "Use checked files" takes. */
+  checkedSampleIds?: readonly string[];
+  /** Edit gates: to the Gating tab, where the populations' gates are drawn and changed. */
+  onOpenGating?: () => void;
   /** Put the chart on the Layout tab as a block per panel, in the arrangement drawn here, and its legend. */
   onAddPanelsToLayout?: (settings: ProportionsSettings, blocks: PlottingPanelBlock[]) => void;
   /** Every page of the chart on the Layout tab, a new sheet per page named by its label, each holding a block of that page. */
@@ -94,8 +105,6 @@ interface Props {
   gatingRange?: (channel: string) => [number, number] | undefined;
   /** The Illustration figure's panel size, so a chart's panels can be made the same size; unset when there is no figure. */
   illustrationPanelSize?: number;
-  /** The chart picker and its undo and redo, drawn at the top of the side panel. */
-  chartBar?: ReactNode;
   /** Set a metadata column's order of its values for the whole workspace, or clear it (undefined) for the file list's order. */
   onColumnLevels?: (column: string, levels: string[] | undefined) => void;
 }
@@ -164,6 +173,7 @@ const PLOT_TYPE_LABELS: Record<ProportionsSettings["plotType"], string> = {
   dots: "Points",
   splitViolin: "Split violin",
   ridgeline: "Ridgelines",
+  heatmap: "Summary heatmap",
 };
 /** A panel's height beyond its plot: the title above and the axis labels below. */
 const PANEL_MARGIN_HEIGHT = 68;
@@ -215,12 +225,13 @@ export function PlottingTab({
   dataRevisionKey,
   onConfigChange,
   onAddToLayout,
+  checkedSampleIds,
+  onOpenGating,
   onAddPanelsToLayout,
   onAddPagesToLayout,
   onAddPanelPagesToLayout,
   gatingRange,
   illustrationPanelSize,
-  chartBar,
   onColumnLevels,
 }: Props) {
   const files = useStableFiles(givenFiles);
@@ -256,6 +267,10 @@ export function PlottingTab({
   const [showN, setShowN] = usePersistedTabState("prop.showN", defaults.showN);
   const [colourByPopulation, setColourByPopulation] = usePersistedTabState("prop.colourByPopulation", false);
   const [populationsTogether, setPopulationsTogether] = usePersistedTabState("prop.populationsTogether", false);
+  // A ridgeline chart's style: held whole, saved only where it differs from the defaults.
+  const [ridgelineHeld, setRidgelineHeld] = usePersistedTabState<RidgelineStyle>("prop.ridgeline", () => defaults.ridgeline ?? DEFAULT_RIDGELINE_STYLE);
+  const ridgeline = normalizeRidgelineStyle(ridgelineHeld) ?? DEFAULT_RIDGELINE_STYLE;
+  const setRidgeline = (change: Partial<RidgelineStyle>) => setRidgelineHeld((held) => normalizeRidgelineStyle({ ...held, ...change }) ?? DEFAULT_RIDGELINE_STYLE);
   const rootId = state.root_population_id ?? "";
   const divisionSamples = useMemo(
     () => samples.filter((entry) => divisionProfiles[entry.id]),
@@ -293,14 +308,21 @@ export function PlottingTab({
     setChannels([key, ...extraChannels.filter((extra) => extra !== key)]);
   };
   // The list keeps the first channel first, so a chart read from it draws the same one.
-  const toggleChannel = (key: string, on: boolean) => {
+  const toggleChannels = (keys: string[], on: boolean) => {
     setChannel(channel);
-    setChannels([channel, ...(on ? [...extraChannels, key] : extraChannels.filter((extra) => extra !== key))]);
+    setChannels([channel, ...(on ? [...extraChannels, ...keys.filter((key) => !extraChannels.includes(key))] : extraChannels.filter((extra) => !keys.includes(extra)))]);
   };
   const [xAxis, setXAxis] = usePersistedTabState<"populations" | "groups">("prop.xAxis", defaults.xAxis);
   const [cellRange, setCellRange] = usePersistedTabState<"gating" | "fit">("prop.cellRange", defaults.cellRange);
   const [violinBox, setViolinBox] = usePersistedTabState("prop.violinBox", defaults.violinBox);
   const [statistic, setStatistic] = usePersistedTabState<ProportionsSettings["statistic"]>("prop.statistic", defaults.statistic);
+  // A summary heatmap's own scale, colours, order and cell size, kept with the chart.
+  const [heatmapScale, setHeatmapScale] = usePersistedTabState<ProportionsSettings["heatmapScale"]>("prop.heatmapScale", defaults.heatmapScale ?? BASE_PROPORTIONS_SETTINGS.heatmapScale);
+  const [heatmapPalette, setHeatmapPalette] = usePersistedTabState<ProportionsSettings["heatmapPalette"]>("prop.heatmapPalette", defaults.heatmapPalette ?? BASE_PROPORTIONS_SETTINGS.heatmapPalette);
+  const [heatmapClusterRows, setHeatmapClusterRows] = usePersistedTabState("prop.heatmapClusterRows", defaults.heatmapClusterRows ?? false);
+  const [heatmapClusterColumns, setHeatmapClusterColumns] = usePersistedTabState("prop.heatmapClusterColumns", defaults.heatmapClusterColumns ?? false);
+  const [heatmapShowValues, setHeatmapShowValues] = usePersistedTabState("prop.heatmapShowValues", defaults.heatmapShowValues ?? true);
+  const [heatmapCellSize, setHeatmapCellSize] = usePersistedTabState("prop.heatmapCellSize", defaults.heatmapCellSize ?? BASE_PROPORTIONS_SETTINGS.heatmapCellSize);
   const [errorBar, setErrorBar] = usePersistedTabState<ProportionsSettings["errorBar"]>("prop.errorBar", defaults.errorBar);
   const [rankTest, setRankTest] = usePersistedTabState("prop.test", defaults.test);
   const [comparisons, setComparisons] = usePersistedTabState<ProportionsSettings["comparisons"]>("prop.comparisons", defaults.comparisons);
@@ -315,6 +337,8 @@ export function PlottingTab({
   const stat = valueKind === "statistic";
   // A chart of a channel's values, per cell or per sample, rather than of proportions.
   const channelChart = cells || stat;
+  // A summary heatmap: a row per population in each replicate unit, a column per channel.
+  const heatmap = valueKind === "heatmap";
   const chooseValueKind = (kind: ProportionsSettings["valueKind"]) => {
     setValueKind(kind);
     if (!PLOT_TYPES_BY_VALUE[kind].includes(plotTypeHeld)) setPlotType(PLOT_TYPES_BY_VALUE[kind][0]);
@@ -382,6 +406,11 @@ export function PlottingTab({
   const [pageIndex, setPageIndex] = useState(0);
   const [panelsPerRow, setPanelsPerRow] = usePersistedTabState("prop.panelsPerRow", defaults.panelsPerRow);
   const [panelWidth, setPanelWidth] = usePersistedTabState("prop.panelWidth", defaults.panelWidth);
+  // While the chart's corner is dragged: the size it is drawn at, kept in the settings on release.
+  const [dragSize, setDragSize] = useState<ChartSize | null>(null);
+  const drawnPanelWidth = dragSize?.panelWidth ?? panelWidth;
+  const drawnHeight = dragSize?.height ?? chartHeight;
+  const chartFrameRef = useRef<HTMLDivElement>(null);
   // A change marks the workspace unsaved; opening the tab, or a workspace opening under it, does not.
   const configMounted = useRef(false);
   useEffect(() => {
@@ -409,6 +438,7 @@ export function PlottingTab({
     followFigureStyle,
     colourByPopulation,
     populationsTogether,
+    ridgelineHeld,
     chartHeight,
     showGrid,
     showPoints,
@@ -439,6 +469,12 @@ export function PlottingTab({
     valueFromZero,
     shareValueAxis,
     replicateMarks,
+    heatmapScale,
+    heatmapPalette,
+    heatmapClusterRows,
+    heatmapClusterColumns,
+    heatmapShowValues,
+    heatmapCellSize,
   ]);
 
   useEffect(() => {
@@ -463,9 +499,9 @@ export function PlottingTab({
     [selectedFiles, hierarchyId, categoryKind, parentSel, selectedPopsRaw, includeUngated, groupSel, unitSel, facetSel],
   );
   const model = useMemo(
-    () => (channelChart ? EMPTY_PROPORTIONS_MODEL : buildProportionsModel(modelSettings, files, activeState, metadata, divisionProfiles)),
+    () => (channelChart || heatmap ? EMPTY_PROPORTIONS_MODEL : buildProportionsModel(modelSettings, files, activeState, metadata, divisionProfiles)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [channelChart, modelSettings, files, divisionProfiles, activeState.gate_version, activeState.stored_hierarchies, metadata, dataRevisionKey],
+    [channelChart, heatmap, modelSettings, files, divisionProfiles, activeState.gate_version, activeState.stored_hierarchies, metadata, dataRevisionKey],
   );
   // The cells of a per-cell or statistic chart: counted again only when its data inputs change,
   // never for a style change. A statistic takes each replicate unit's cells on linear values, as
@@ -526,23 +562,33 @@ export function PlottingTab({
 
   // Where the dimensions sit: one along x, and the panels wrapped or a column or row per value of
   // the chart's panel dimensions, as the Arrange dimensions shelves place them.
-  const drawnChannels = channelChart ? [channel, ...extraModels.map((part) => part.key)] : [channel];
+  const drawnChannels = channelChart ? [channel, ...extraModels.map((part) => part.key)] : heatmap ? [channel, ...extraChannels] : [channel];
   const shelfSettings = { valueKind, plotType, xAxis, populationsTogether: together, panelColumns, panelRows, pageBy, channel, channels: drawnChannels };
   const hasFacet = facetSel !== NONE_OPT;
   const shelves = chartShelves(shelfSettings, hasFacet);
   const arrangement = { panelColumns, panelRows, pageBy, panelsPerRow, panelWidth };
-  const placeDimension = (dimension: string, shelf: string) => {
-    const patch = placeChartDimension(shelfSettings, hasFacet, dimension as ChartDimension, shelf as ChartShelf);
+  // What a move did besides what was asked: said under the control, so nothing moves unseen.
+  const [arrangeNote, setArrangeNote] = useState<string | null>(null);
+  const placeDimension = (dimension: ChartDimension, shelf: ChartShelf) => {
+    const patch = placeChartDimension(shelfSettings, hasFacet, dimension, shelf);
+    const moved = movedAlong(shelves, chartShelves({ ...shelfSettings, ...patch }, hasFacet), dimension);
+    const placeName = (place: string) => (place === "x" ? t("inside each panel") : place === "columns" ? t("the columns") : place === "rows" ? t("the rows") : place === "pages" ? t("pages") : t("the wrapped panels"));
+    setArrangeNote(moved.length ? moved.map(({ dimension: other, place }) => t("{name} moved to {place}.", { name: dimensionLabel(other), place: placeName(place) })).join(" ") : null);
     if (patch.xAxis !== undefined) setXAxis(patch.xAxis);
     if (patch.panelColumns !== undefined) setPanelColumns(patch.panelColumns);
     if (patch.panelRows !== undefined) setPanelRows(patch.panelRows);
     if (patch.pageBy !== undefined) setPageBy(patch.pageBy);
   };
   const factorName = (factor: string) => (factor === SAMPLE_OPT ? t("Files") : proportionsFactorTitle(factor) ?? factor);
-  const dimensionChip = (dimension: ChartDimension) => {
-    const label = dimension === "channels" ? t("Channels") : dimension === "populations" ? t("Populations") : dimension === "groups" ? factorName(groupSel) : factorName(facetSel);
-    return { id: dimension, label, name: label, fixed: !chartDimensionMovable(shelfSettings, dimension) };
-  };
+  const dimensionLabel = (dimension: ChartDimension) =>
+    dimension === "channels" ? t("Channels") : dimension === "populations" ? t("Populations") : dimension === "groups" ? factorName(groupSel) : factorName(facetSel);
+  // A dimension's values in the singular, for the sentence under the control.
+  const factorNoun = (factor: string) => (factor === SAMPLE_OPT ? t("file") : proportionsFactorTitle(factor) ?? factor);
+  const dimensionNoun = (dimension: ChartDimension) =>
+    dimension === "channels" ? t("channel") : dimension === "populations" ? t("population") : dimension === "groups" ? factorNoun(groupSel) : factorNoun(facetSel);
+  const markNoun = plotType === "ridgeline" ? t("a ridge") : plotType === "violin" ? t("a violin") : plotType === "splitViolin" ? t("half a violin") : plotType === "bar" ? t("a bar") : plotType === "dots" ? t("a point") : t("a box");
+  // Inside each panel: the populations or the groups, a choice where the chart lets either run along x.
+  const insideChoices: ChartDimension[] = together ? [] : (["populations", "groups"] as const).filter((dimension) => chartShelfAllowed(shelfSettings, dimension, "x"));
   const matchIllustration = () => {
     if (!illustrationPanelSize) return;
     // Illustration's panel size is a plot's whole side, its margins included.
@@ -607,8 +653,8 @@ export function PlottingTab({
   }, [cellModel, extraModels, cells, stat, cellRange, gatingRange, valueMin, valueMax, channel, xAxisFrame, replicates, channelOptions]);
   // With a dimension on Pages, a page per value, one shown at a time with the pager.
   const pages = useMemo(
-    () => plottingPages({ ...BASE_PROPORTIONS_SETTINGS, valueKind, plotType, xAxis, populationsTogether: together, pageBy, channel, channels: channelParts?.map((part) => part.key) ?? [channel] }, channelChart ? null : model, cellModel, { groups: groupLevels, facets: facetLevels }),
-    [valueKind, plotType, xAxis, together, pageBy, channel, channelParts, channelChart, model, cellModel, groupLevels, facetLevels],
+    () => heatmap ? [] : plottingPages({ ...BASE_PROPORTIONS_SETTINGS, valueKind, plotType, xAxis, populationsTogether: together, pageBy, channel, channels: channelParts?.map((part) => part.key) ?? [channel] }, channelChart ? null : model, cellModel, { groups: groupLevels, facets: facetLevels }),
+    [heatmap, valueKind, plotType, xAxis, together, pageBy, channel, channelParts, channelChart, model, cellModel, groupLevels, facetLevels],
   );
   const currentPage = Math.min(pageIndex, Math.max(0, pages.length - 1));
   const page = pages.length ? pages[currentPage] : undefined;
@@ -635,12 +681,16 @@ export function PlottingTab({
     arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
   // As Illustration's export does, the page shown is written.
   const exportChart = (kind: "svg" | "png" | "pdf") =>
-    void downloadChart("gl-prop-svg", pages.length ? `proportions_page-${currentPage + 1}` : "proportions", kind);
+    void downloadChart("gl-prop-svg", heatmap ? "heatmap" : pages.length ? `proportions_page-${currentPage + 1}` : "proportions", kind);
   // The table the chart is drawn from. A per-cell chart's summaries are taken again on the cells'
   // linear values, as the Statistics tab takes them on Raw; the drawn model holds display values,
   // on which the whiskers are found. The same rows are shown under the chart; the function is
   // made again only when its inputs change, so the open table is not rebuilt for a redraw.
+  const [heatmapMatrix, setHeatmapMatrix] = useState<HeatmapMatrix | null>(null);
   const chartDataTable = useMemo(() => () => {
+    // A heatmap's table: a row per heatmap row in drawing order, each channel's statistic on its
+    // display scale, then the row's events.
+    if (heatmap) return heatmapDataTable(heatmapMatrix);
     const titles = { group: proportionsFactorTitle(groupSel), unit: proportionsFactorTitle(unitSel), facet: proportionsFactorTitle(facetSel) };
     const channelLabel = cellModel?.channelLabel ?? channel;
     const levels = { groups: groupLevels, facets: facetLevels, units: unitLevels };
@@ -662,11 +712,11 @@ export function PlottingTab({
     return proportionsDataTable(model, titles, (id) => names.get(id) ?? id, unitSel === SAMPLE_OPT || unitSel === NONE_OPT, levels, plotType === "stacked" ? "parent" : proportionValue, tests);
   },
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [stat, cells, model, cellModel, channelParts, channel, valueKind, modelSettings, files, metadata, activeState.gate_version, activeState.stored_hierarchies, dataRevisionKey, groupSel, unitSel, facetSel, groupLevels, facetLevels, unitLevels, statistic, errorBar, rankTest, together, comparisons, comparisonsShow, pairedLines, xAxis, plotType, proportionValue, panelWidth, chartHeight, fontTick, fontAxis, replicates]);
+  [heatmap, heatmapMatrix, stat, cells, model, cellModel, channelParts, channel, valueKind, modelSettings, files, metadata, activeState.gate_version, activeState.stored_hierarchies, dataRevisionKey, groupSel, unitSel, facetSel, groupLevels, facetLevels, unitLevels, statistic, errorBar, rankTest, together, comparisons, comparisonsShow, pairedLines, xAxis, plotType, proportionValue, panelWidth, chartHeight, fontTick, fontAxis, replicates]);
   const exportData = () => {
     const csv = plottingDataTableCsv(chartDataTable());
     const stamp = new Date().toISOString().slice(0, 10);
-    triggerDownload(URL.createObjectURL(new Blob([csv], { type: "text/csv" })), `plotting_${stat ? "statistic" : cells ? "cells" : "proportions"}_${stamp}.csv`);
+    triggerDownload(URL.createObjectURL(new Blob([csv], { type: "text/csv" })), `plotting_${heatmap ? "heatmap" : stat ? "statistic" : cells ? "cells" : "proportions"}_${stamp}.csv`);
   };
   // With pages, the page shown: the block records it, and the panels are the page's.
   const addToLayout = () => onAddToLayout?.(currentSettings(), page !== undefined ? ({ page } satisfies LayoutProportionsPanel) : undefined);
@@ -682,6 +732,46 @@ export function PlottingTab({
     onAddPanelPagesToLayout?.(settings, pages.map((value) => ({ label: pageLabel(value), blocks: plottingPanelBlocks(settings, channelChart ? null : model, cellModel, levels, value, channelParts) })));
   };
   const pagesMenu = useEveryPageMenu();
+  // A right-click on the chart: the Layout hand-offs and the exports, and the panel under the
+  // pointer on its own. The panels are drawn in the order plottingPanelBlocks lists them, so the
+  // panel's place among the chart's panels is its block.
+  const [chartMenu, setChartMenu] = useState<ContextMenuState | null>(null);
+  const addable = samples.length > 0 && nCat > 0 && drawable;
+  const openChartMenu = (event: React.MouseEvent<HTMLElement>) => {
+    const target = event.target as Element;
+    if (!target.closest(".gl-prop-chart")) return;
+    event.preventDefault();
+    const clicked = target.closest("svg.gl-prop-panel");
+    const drawn = [...event.currentTarget.querySelectorAll(".gl-prop-panels svg.gl-prop-panel")];
+    const settings = currentSettings();
+    const blocks = addable ? plottingPanelBlocks(settings, channelChart ? null : model, cellModel, levels, page, channelParts) : [];
+    const block = clicked && blocks.length > 1 && blocks.length === drawn.length ? blocks[drawn.indexOf(clicked)] : undefined;
+    const named = block?.panel as { channel?: string; facet?: string; group?: string; population?: string } | undefined;
+    const panelName = named
+      ? [named.channel && (channelParts?.find((part) => part.key === named.channel)?.label ?? named.channel), named.facet, named.group, named.population].filter(Boolean).join(" · ")
+      : "";
+    const layoutItems: MenuEntry[] = onAddToLayout
+      ? [
+          { label: t("Add the chart to Layout"), title: t("One block on the Layout tab, drawn there as it is here; its files and populations stay its own"), disabled: !addable, onClick: addToLayout },
+          ...(pages.length > 1 && onAddPagesToLayout ? [{ label: t("Add every page to Layout"), title: t("A sheet per page, each with the chart's block"), disabled: !addable, onClick: addPagesToLayout } satisfies MenuEntry] : []),
+          ...(block ? [{ label: t("Add this panel to Layout"), title: t("This panel alone, {panel}, as one block on the Layout tab", { panel: panelName }), onClick: () => onAddToLayout(settings, block.panel) } satisfies MenuEntry] : []),
+          ...(onAddPanelsToLayout ? [{ label: t("Add panels to Layout"), title: t("A block per panel on the Layout tab, in the arrangement drawn here, and the legend as a block of its own"), disabled: !addable, onClick: addPanelsToLayout } satisfies MenuEntry] : []),
+          "separator",
+        ]
+      : [];
+    setChartMenu({
+      x: event.clientX,
+      y: event.clientY,
+      label: t("Chart"),
+      items: [
+        ...layoutItems,
+        { label: t("Export PNG"), onClick: () => exportChart("png") },
+        { label: t("Export SVG"), onClick: () => exportChart("svg") },
+        { label: t("Export PDF"), onClick: () => exportChart("pdf") },
+        { label: t("Export the data (CSV)"), disabled: !drawable, onClick: exportData },
+      ],
+    });
+  };
   // Under the test control: whether to compare every pair, which brackets to draw, and one line
   // saying what is tested and on what (comparisonDescription, which a Layout legend also gives).
   const comparisonGroups = cellModel ? new Set(cellModel.violins.map((violin) => violin.group)).size : new Set(model.perSample.map((row) => row.group)).size;
@@ -705,6 +795,8 @@ export function PlottingTab({
       {enabled && testDescription && <p className="gl-hint gl-prop-test-description">{testDescription}.</p>}
     </>
   );
+  // The panels as drawn: at the size being dragged to, while the chart's corner is dragged.
+  const drawnArrangement = { ...arrangement, panelWidth: drawnPanelWidth };
   const currentSettings = (): ProportionsSettings => ({
       ...modelSettings,
       valueKind,
@@ -728,6 +820,7 @@ export function PlottingTab({
       followFigureStyle,
       ...(colourByPopulation ? { colourByPopulation: true } : {}),
       ...(populationsTogether ? { populationsTogether: true } : {}),
+      ...(normalizeRidgelineStyle(ridgeline) ? { ridgeline } : {}),
       height: chartHeight,
       grid: showGrid,
       points: showPoints,
@@ -742,46 +835,21 @@ export function PlottingTab({
       panelsPerRow,
       panelWidth,
       ...axisSettings,
+      heatmapScale,
+      heatmapPalette,
+      heatmapClusterRows,
+      heatmapClusterColumns,
+      heatmapShowValues,
+      heatmapCellSize,
     });
 
   return (
     <div
-      className={`gl-tab-panel gl-tab-fill gl-plotting-workspace section-${section}`}
+      className={`gl-tab-panel gl-tab-fill gl-plotting-workspace gl-plotting-headless section-${section}`}
     >
-      <div className="gl-plotting-head">
-        <strong>Plotting</strong>
-        <span>{t("Population composition, replicate-level distributions and per-cell values")}</span>
-        <TabIntroToggle intro={intro} />
-        {onAddToLayout && (
-          <div className="gl-plotting-head-actions">
-            <button
-              type="button"
-              className="gl-mini-btn"
-              disabled={samples.length === 0 || nCat === 0 || !drawable}
-              title={t("One block on the Layout tab, drawn there as it is here; its files and populations stay its own")}
-              onClick={(event) => pagesMenu.open(event, pages.length, addToLayout, onAddPagesToLayout && addPagesToLayout)}
-            >
-              {t("Add to Layout")}
-            </button>
-            {onAddPanelsToLayout && (
-              <button
-                type="button"
-                className="gl-mini-btn"
-                disabled={samples.length === 0 || nCat === 0 || !drawable}
-                title={t("A block per panel on the Layout tab, in the arrangement drawn here, and the legend as a block of its own; under a sheet's file iteration, panels that differ only in their populations are drawn for each file")}
-                onClick={(event) => pagesMenu.open(event, pages.length, addPanelsToLayout, onAddPanelPagesToLayout && addPanelPagesToLayout)}
-              >
-                {t("Add panels to Layout")}
-              </button>
-            )}
-            {pagesMenu.menu}
-          </div>
-        )}
-      </div>
       <aside className="gl-plotting-inspector" aria-label="Plotting controls">
-        {chartBar}
         <nav className="gl-presentation-tabs" aria-label="Plotting inspector">
-          {["data", "plot", "style", "export"].map((tab) => (
+          {["data", "plot", "arrange", "style", "export"].map((tab) => (
             <button
               key={tab}
               aria-pressed={section === tab}
@@ -790,6 +858,7 @@ export function PlottingTab({
               {tab[0].toUpperCase() + tab.slice(1)}
             </button>
           ))}
+          <TabIntroToggle intro={intro} />
         </nav>
         <section className="gl-plotting-files">
           <h3>{t("Files / samples")} <span>{t("{count} selected", { count: samples.length })}</span></h3>
@@ -797,6 +866,7 @@ export function PlottingTab({
             files={files.map((file) => ({ id: file.id, name: file.name, metadata: metadata[file.id] }))}
             selected={selectedFiles}
             onChange={setSelectedFiles}
+            checkedIds={checkedSampleIds}
             columns={[groupSel, unitSel, facetSel].filter((column, i, all) => column !== SAMPLE_OPT && column !== NONE_OPT && all.indexOf(column) === i)}
             levels={columnLevels}
             listClassName="gl-plotting-filelist"
@@ -805,6 +875,13 @@ export function PlottingTab({
         {categoryKind === "population" && (
           <section className="gl-plotting-populations" aria-label="Populations">
             <h3>Populations <span>{selectedPops.length} selected</span></h3>
+            {onOpenGating && (
+              <div className="gl-plotting-actions">
+                <button type="button" className="gl-mini-btn" title={t("The populations' gates are drawn and changed on the Gating tab")} onClick={onOpenGating}>
+                  {t("Edit gates")}
+                </button>
+              </div>
+            )}
             {/* The parent the shares are of: changed by picking a population in the tree, which
                 then offers that parent's descendants to tick. */}
             <div className="gl-plotting-parent">
@@ -865,7 +942,7 @@ export function PlottingTab({
                 <input
                   type="radio"
                   name="prop-value"
-                  checked={!channelChart}
+                  checked={!channelChart && !heatmap}
                   onChange={() => chooseValueKind("proportion")}
                 />
                 {t("Proportions")}
@@ -888,8 +965,17 @@ export function PlottingTab({
                 />
                 {t("Channel statistic per sample (points, bars)")}
               </label>
+              <label className="gl-check" title={t("A row per population in each file or replicate unit, a column per channel, each cell the channel's median or mean on its display scale, as the Illustration tab's summary heatmap")}>
+                <input
+                  type="radio"
+                  name="prop-value"
+                  checked={heatmap}
+                  onChange={() => chooseValueKind("heatmap")}
+                />
+                {t("Summary heatmap (populations × channels)")}
+              </label>
               <span className="gl-ctl-sep" />
-              {PLOT_TYPES_BY_VALUE[valueKind].map((type) => (
+              {!heatmap && PLOT_TYPES_BY_VALUE[valueKind].map((type) => (
                 <label key={type} className="gl-check" title={plotTypeHint(type)}>
                   <input
                     type="radio"
@@ -901,7 +987,7 @@ export function PlottingTab({
                   {t(PLOT_TYPE_LABELS[type])}
                 </label>
               ))}
-              {!channelChart && (
+              {!channelChart && !heatmap && (
                 <>
                   <label className="gl-field-inline" title={plotType === "stacked" ? t("A stacked bar is the composition of the parent") : t("What each replicate unit's value is: the population's share of its parent, of the file's root population, or its events, as the Statistics tab gives them")}>
                     {t("Value")}
@@ -927,7 +1013,7 @@ export function PlottingTab({
                   {comparisonControls(rankTest && plotType !== "stacked")}
                 </>
               )}
-              {channelChart && (
+              {(channelChart || heatmap) && (
                 <>
                   <span className="gl-ctl-sep" />
                   <label className="gl-field-inline">
@@ -942,19 +1028,49 @@ export function PlottingTab({
                   </label>
                   <details className="gl-prop-channels">
                     <FoldSummary>
-                      <span title={t("Draw more channels, each in panels of its own on its own value axis")}>
+                      <span title={heatmap ? t("Draw more channels, each a column of the heatmap, in the order ticked") : t("Draw more channels, each in panels of its own on its own value axis")}>
                         {extraChannels.length ? t("Channels: {count}", { count: String(extraChannels.length + 1) }) : t("More channels")}
                       </span>
                     </FoldSummary>
-                    <fieldset aria-label={t("More channels")}>
-                      {channelOptions.filter((option) => option.key !== channel).map((option) => (
-                        <label key={option.key} className="gl-check">
-                          <input type="checkbox" checked={extraChannels.includes(option.key)} onChange={(e) => toggleChannel(option.key, e.target.checked)} />
-                          {option.label}
-                        </label>
-                      ))}
-                    </fieldset>
+                    <ChannelChecklist
+                      label={t("More channels")}
+                      options={channelOptions.filter((option) => option.key !== channel)}
+                      checked={extraChannels}
+                      onToggle={toggleChannels}
+                    />
                   </details>
+                  {heatmap && (
+                    <>
+                      <label className="gl-field-inline" title={t("Of each channel's display values, the events of a row's files pooled, as the Illustration heatmap takes it")}>
+                        {t("Statistic")}
+                        <select aria-label={t("Statistic")} value={statistic === "mean" ? "mean" : "median"} onChange={(e) => setStatistic(e.target.value as ProportionsSettings["statistic"])}>
+                          <option value="median">{t("Median")}</option>
+                          <option value="mean">{t("Mean")}</option>
+                        </select>
+                      </label>
+                      <label className="gl-field-inline">
+                        {t("Scale")}
+                        <select aria-label={t("Heatmap scale")} value={heatmapScale} onChange={(e) => setHeatmapScale(e.target.value as ProportionsSettings["heatmapScale"])}>
+                          <option value="column_quantile">{t("Per channel, 1st to 99th percentile")}</option>
+                          <option value="column_minmax">{t("Per channel, minimum to maximum")}</option>
+                          <option value="column_zscore">{t("Per channel, z-score")}</option>
+                          <option value="row_minmax">{t("Per row, minimum to maximum")}</option>
+                          <option value="none">{t("Unscaled")}</option>
+                        </select>
+                      </label>
+                      <label className="gl-check" title={t("Order the rows by average-linkage clustering, with a dendrogram; off, they follow the populations and files")}>
+                        <input type="checkbox" checked={heatmapClusterRows} onChange={(e) => setHeatmapClusterRows(e.target.checked)} />
+                        {t("Cluster rows")}
+                      </label>
+                      <label className="gl-check" title={t("Order the channels by average-linkage clustering, with a dendrogram; off, they follow the order ticked")}>
+                        <input type="checkbox" checked={heatmapClusterColumns} onChange={(e) => setHeatmapClusterColumns(e.target.checked)} />
+                        {t("Cluster channels")}
+                      </label>
+                      <TabIntro intro={intro}>
+                        {t("Each row is a population in one file, or in the files of one replicate unit pooled, ordered by group when a Group is chosen. Each column is a channel. A cell is the median or mean of the channel's display values (as the Gating tab draws them) over the row's events, computed as the Illustration tab's summary heatmap computes it, so the two tabs agree; the scale then colours each channel or row.")}
+                      </TabIntro>
+                    </>
+                  )}
                   {stat && (
                     <>
                       <label className="gl-field-inline">
@@ -1022,11 +1138,21 @@ export function PlottingTab({
                   )}
                 </>
               )}
+            </div>
+          </section>
+
+          <section
+            className="gl-control-section gl-control-section-wide gl-prop-section-data"
+            aria-labelledby="prop-data-heading"
+          >
+            <span id="prop-data-heading" className="gl-control-section-label">
+              {t("Grouping")}
+            </span>
+            <div className="gl-control-section-body">
               {/* Population or Division, drawn only when Division can be chosen: a division
                   profile is applied and the chart is a proportion chart. */}
-              {hasDivision && !channelChart && (
+              {hasDivision && !channelChart && !heatmap && (
                 <>
-                  <span className="gl-ctl-sep" />
                   <label className="gl-check">
                     <input
                       type="radio"
@@ -1047,17 +1173,6 @@ export function PlottingTab({
                   </label>
                 </>
               )}
-            </div>
-          </section>
-
-          <section
-            className="gl-control-section gl-control-section-wide gl-prop-section-data"
-            aria-labelledby="prop-data-heading"
-          >
-            <span id="prop-data-heading" className="gl-control-section-label">
-              {t("Grouping")}
-            </span>
-            <div className="gl-control-section-body">
               <label className="gl-field-inline">
                 {t("Group")}
                 <select
@@ -1075,12 +1190,13 @@ export function PlottingTab({
                 {t("Replicate unit")}
                 <select
                   value={unitSel}
-                  disabled={(cells && !replicateOn) || (plotType === "stacked" && !averagePerUnit)}
+                  disabled={!heatmap && ((cells && !replicateOn) || (plotType === "stacked" && !averagePerUnit))}
                   onChange={(e) => setUnitSel(e.target.value)}
                 >
                   {factorOptions}
                 </select>
               </label>
+              {!heatmap && (<>
               <label className="gl-field-inline">
                 {t("Facet")}
                 <select
@@ -1119,63 +1235,51 @@ export function PlottingTab({
                 {parentId === rootId ? t("Include ungated") : t("Include the rest of the parent")}
               </label>
               <TabIntro intro={intro}>Composition assigns events to their deepest selected population. Excluding ungated events renormalizes percentages to the selected populations.</TabIntro>
-              <div className="gl-prop-shelves" role="group" aria-labelledby="prop-shelves-heading">
-                <h3 id="prop-shelves-heading" title={t("Drag between shelves, or use the placement menus.")}>{t("Arrange dimensions")}</h3>
-                <DimensionShelves
-                  dragType="text/gatelab-chart-dimension"
-                  shelves={[
-                    {
-                      id: "x",
-                      label: t("Along x"),
-                      chips: [
-                        ...shelves.x.map(dimensionChip),
-                        ...(shelves.stack ? [{ id: "stack", label: t("Stack"), name: t("Stack"), fixed: true }] : []),
-                      ],
-                      footer: drawnChannels.length > 1 ? <p className="gl-hint">{t("Channels are drawn in panels of their own, each on its own value axis; they do not run along x.")}</p> : undefined,
-                    },
-                    { id: "columns", label: t("Columns"), chips: shelves.columns.map(dimensionChip) },
-                    { id: "rows", label: t("Rows"), chips: shelves.rows.map(dimensionChip) },
-                    { id: "pages", label: t("Pages"), chips: shelves.pages.map(dimensionChip) },
-                    {
-                      id: "wrap",
-                      label: t("Wrap"),
-                      chips: shelves.wrap.map(dimensionChip),
-                      footer: (
-                        <>
-                          <label className="gl-field-inline">
-                            {t("Per row")}
-                            <NumberField
-                              aria-label="Panels per row"
-                              value={panelsPerRow}
-                              min={1}
-                              max={12}
-                              integer
-                              disabled={shelves.columns.length > 0 || shelves.rows.length > 0}
-                              onCommit={setPanelsPerRow}
-                            />
-                          </label>
-                          {shelves.wrap.length > 0 && (shelves.columns.length > 0 || shelves.rows.length > 0) && (
-                            <p className="gl-hint">
-                              {shelves.columns.length > 0
-                                ? t("With a dimension on Columns, these run down the rows.")
-                                : t("With a dimension on Rows only, these run across the columns.")}
-                            </p>
-                          )}
-                        </>
-                      ),
-                    },
-                  ]}
-                  places={[
-                    { value: "x", label: t("Along x") },
-                    { value: "columns", label: t("Columns") },
-                    { value: "rows", label: t("Rows") },
-                    { value: "pages", label: t("Pages") },
-                    { value: "wrap", label: t("Wrap") },
-                  ]}
-                  canPlace={(dimension, shelf) => chartShelfAllowed(shelfSettings, dimension as ChartDimension, shelf as ChartShelf)}
+              </>)}
+              {heatmap && (
+                <TabIntro intro={intro}>
+                  {t("In a heatmap, Group orders the rows, and the replicate unit decides them: each file is a row, or with a unit column chosen, the files sharing its value are pooled into one row.")}
+                </TabIntro>
+              )}
+            </div>
+          </section>
+
+          <section
+            className="gl-control-section gl-control-section-wide gl-prop-section-arrange"
+            aria-labelledby="prop-arrange-heading"
+          >
+            <span id="prop-arrange-heading" className="gl-control-section-label">
+              {t("Arrange")}
+            </span>
+            <div className="gl-control-section-body">
+              {heatmap ? (
+                <p className="gl-hint">{t("A heatmap is one panel: its rows are set under Data, its columns under Plot.")}</p>
+              ) : (
+                <PanelLayoutControl
+                  shelves={shelves}
+                  label={dimensionLabel}
+                  insideChoices={insideChoices}
+                  insideHint={plotType === "ridgeline" ? t("Drawn as ridges, top to bottom.") : together ? t("Along the x axis, the populations side by side at each.") : t("Along the x axis.")}
+                  canPlace={(dimension, shelf) => chartShelfAllowed(shelfSettings, dimension, shelf)}
                   onPlace={placeDimension}
+                  note={arrangeNote}
+                  summary={panelLayoutSummary(shelves, dimensionNoun, markNoun, panelsPerRow, t, together)}
+                  perRow={
+                    <label className="gl-field-inline">
+                      {t("Per row")}
+                      <NumberField
+                        aria-label="Panels per row"
+                        value={panelsPerRow}
+                        min={1}
+                        max={12}
+                        integer
+                        disabled={shelves.columns.length > 0 || shelves.rows.length > 0}
+                        onCommit={setPanelsPerRow}
+                      />
+                    </label>
+                  }
                 />
-              </div>
+              )}
             </div>
           </section>
 
@@ -1190,6 +1294,42 @@ export function PlottingTab({
               {t("Appearance")}
             </span>
             <div className="gl-control-section-body">
+              {heatmap ? (
+                <>
+                  <label className="gl-field-inline">
+                    {t("Palette")}
+                    <select aria-label={t("Heatmap palette")} value={heatmapPalette} onChange={(e) => setHeatmapPalette(e.target.value as ProportionsSettings["heatmapPalette"])}>
+                      <option value="rdylbu">{t("Red–yellow–blue")}</option>
+                      <option value="blue_white_yellow_red">{t("Blue–white–yellow–red")}</option>
+                      <option value="viridis">Viridis</option>
+                      <option value="heat">{t("Heat")}</option>
+                    </select>
+                  </label>
+                  <label className="gl-field-inline">
+                    {t("Cell size")}
+                    <NumberField aria-label={t("Heatmap cell size")} value={heatmapCellSize} min={12} max={120} integer onCommit={setHeatmapCellSize} />
+                    px
+                  </label>
+                  <label className="gl-check" title={t("Write each cell's value in it, where the cell is large enough")}>
+                    <input type="checkbox" checked={heatmapShowValues} onChange={(e) => setHeatmapShowValues(e.target.checked)} />
+                    {t("Show values")}
+                  </label>
+                  <span className="gl-ctl-sep" />
+                  <FigureStyleFollow following={followFigureStyle} onFollow={setFollowFigureStyle} />
+                  {!followFigureStyle && (
+                    <>
+                      <label className="gl-field-inline">
+                        {t("Tick")}
+                        <NumberField value={fontTick} min={5} max={20} integer onCommit={setFontTick} />
+                      </label>
+                      <label className="gl-field-inline">
+                        {t("Axis")}
+                        <NumberField value={fontAxis} min={5} max={24} integer onCommit={setFontAxis} />
+                      </label>
+                    </>
+                  )}
+                </>
+              ) : (<>
               <label className="gl-field-inline" title={coloursPopulations ? t("Population colours are set in the population tree") : undefined}>
                 {t("Palette")}
                 <select
@@ -1311,6 +1451,73 @@ export function PlottingTab({
                   {t("Populations side by side in one panel")}
                 </label>
               )}
+              {plotType === "ridgeline" && (
+                <>
+                  <span className="gl-ctl-sep" />
+                  <span className="gl-field-inline">{t("Ridges")}</span>
+                  <label className="gl-field-inline" title={t("How far each ridge overlaps the row above it, as a fraction of its height")}>
+                    {t("Overlap")}
+                    <input
+                      type="range"
+                      aria-label={t("Ridge overlap")}
+                      min={RIDGELINE_RANGES.overlap[0]}
+                      max={RIDGELINE_RANGES.overlap[1]}
+                      step={0.05}
+                      value={ridgeline.overlap}
+                      onChange={(event) => setRidgeline({ overlap: +event.target.value })}
+                    />
+                  </label>
+                  <label className="gl-check" title={ridgeline.outline === "none" ? t("A ridge with no outline keeps its fill") : undefined}>
+                    <input
+                      type="checkbox"
+                      checked={ridgeline.fill}
+                      disabled={ridgeline.outline === "none"}
+                      onChange={(event) => setRidgeline({ fill: event.target.checked })}
+                    />
+                    {t("Fill")}
+                  </label>
+                  <label className="gl-field-inline">
+                    {t("Fill opacity")}
+                    <input
+                      type="range"
+                      aria-label={t("Fill opacity")}
+                      min={RIDGELINE_RANGES.fillOpacity[0]}
+                      max={RIDGELINE_RANGES.fillOpacity[1]}
+                      step={0.05}
+                      value={ridgeline.fillOpacity}
+                      disabled={!ridgeline.fill}
+                      onChange={(event) => setRidgeline({ fillOpacity: +event.target.value })}
+                    />
+                  </label>
+                  <label className="gl-field-inline">
+                    {t("Outline")}
+                    <select aria-label={t("Outline")} value={ridgeline.outline} onChange={(event) => setRidgeline({ outline: event.target.value as RidgelineStyle["outline"] })}>
+                      <option value="colour">{t("Ridge colour")}</option>
+                      <option value="black">{t("Black")}</option>
+                      <option value="none" disabled={!ridgeline.fill}>{t("None")}</option>
+                    </select>
+                  </label>
+                  <label className="gl-field-inline">
+                    {t("Outline width")}
+                    <NumberField
+                      aria-label={t("Outline width")}
+                      value={ridgeline.outlineWidth}
+                      min={RIDGELINE_RANGES.outlineWidth[0]}
+                      max={RIDGELINE_RANGES.outlineWidth[1]}
+                      step={0.25}
+                      disabled={ridgeline.outline === "none"}
+                      onCommit={(value) => setRidgeline({ outlineWidth: value })}
+                    />
+                  </label>
+                  <label className="gl-field-inline" title={t("Label the ridges beside every panel, or only beside the first panel of each row of panels")}>
+                    {t("Ridge labels")}
+                    <select aria-label={t("Ridge labels")} value={ridgeline.labels} onChange={(event) => setRidgeline({ labels: event.target.value as RidgelineStyle["labels"] })}>
+                      <option value="every">{t("On every panel")}</option>
+                      <option value="first">{t("On the first panel of each row")}</option>
+                    </select>
+                  </label>
+                </>
+              )}
               <label className="gl-field-inline">
                 {t("Point size")}
                 <input
@@ -1374,6 +1581,7 @@ export function PlottingTab({
                 />
                 {t("Same axis in every panel")}
               </label>
+              </>)}
             </div>
           </section>
 
@@ -1385,6 +1593,32 @@ export function PlottingTab({
               {t("Export")}
             </span>
             <div className="gl-control-section-body">
+              {onAddToLayout && <h3>{t("To the Layout tab")}</h3>}
+              {onAddToLayout && (
+                <div className="gl-plotting-actions gl-prop-layout-actions">
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    disabled={heatmap ? !heatmapMatrix : samples.length === 0 || nCat === 0 || !drawable}
+                    title={t("One block on the Layout tab, drawn there as it is here; its files and populations stay its own")}
+                    onClick={(event) => pagesMenu.open(event, pages.length, addToLayout, onAddPagesToLayout && addPagesToLayout)}
+                  >
+                    {t("Add to Layout")}
+                  </button>
+                  {onAddPanelsToLayout && (
+                    <button
+                      type="button"
+                      className="gl-mini-btn"
+                      disabled={heatmap || samples.length === 0 || nCat === 0 || !drawable}
+                      title={t("A block per panel on the Layout tab, in the arrangement drawn here, and the legend as a block of its own; under a sheet's file iteration, panels that differ only in their populations are drawn for each file")}
+                      onClick={(event) => pagesMenu.open(event, pages.length, addPanelsToLayout, onAddPanelPagesToLayout && addPanelPagesToLayout)}
+                    >
+                      {t("Add panels to Layout")}
+                    </button>
+                  )}
+                  {pagesMenu.menu}
+                </div>
+              )}
               <button
                 className="gl-mini-btn"
                 title={t("The chart and its legend as a PNG at 300 dpi")}
@@ -1420,7 +1654,8 @@ export function PlottingTab({
         </div>
       </aside>
       <div className="gl-prop-body">
-        <div className="gl-prop-chart-scroll">
+        <ContextMenu menu={chartMenu} onClose={() => setChartMenu(null)} />
+        <div className="gl-prop-chart-scroll" onContextMenu={openChartMenu}>
           {cellModel?.excluded.length ? (
             <p className="gl-plotting-warning" role="status">
               {t("{count} files excluded: selected populations are missing, ambiguous, or structurally changed. {names}", { count: String(cellModel.excluded.length), names: cellModel.excluded.join(", ") })}
@@ -1464,7 +1699,25 @@ export function PlottingTab({
                 excluded.
               </div>
             )}
-          {samples.length === 0 || nCat === 0 || !drawable || (cells && !xAxisFrame) ? (
+          <div className="gl-prop-chart-frame" ref={chartFrameRef}>
+          {heatmap ? (
+            samples.length === 0 ? (
+              <div className="gl-tab-empty">
+                {files.length === 0 ? t("Open files or a workspace to plot.") : t("No file is ticked. Tick the files to draw under Data.")}
+              </div>
+            ) : (
+              <PlottingHeatmap
+                settings={currentSettings()}
+                samples={files}
+                state={activeState}
+                metadata={metadata}
+                columnLevels={columnLevels}
+                dataRevisionKey={dataRevisionKey}
+                fonts={{ fontTick, fontAxis }}
+                onMatrix={setHeatmapMatrix}
+              />
+            )
+          ) : samples.length === 0 || nCat === 0 || !drawable || (cells && !xAxisFrame) ? (
             <div className="gl-tab-empty">
               {files.length === 0
                 ? t("Open files or a workspace to plot.")
@@ -1501,8 +1754,8 @@ export function PlottingTab({
               groupTitle={proportionsFactorTitle(groupSel)}
               facetTitle={proportionsFactorTitle(facetSel)}
               fonts={{ tick: fontTick, axis: fontAxis, legend: fontLegend }}
-              appearance={{ height: chartHeight, showGrid, showLegend, showPoints, pointRadius }}
-              arrangement={arrangement}
+              appearance={{ height: drawnHeight, showGrid, showLegend, showPoints, pointRadius }}
+              arrangement={drawnArrangement}
               page={page}
               axisSettings={axisSettings}
               channels={channelParts}
@@ -1525,11 +1778,12 @@ export function PlottingTab({
               groupTitle={proportionsFactorTitle(groupSel)}
               facetTitle={proportionsFactorTitle(facetSel)}
               fonts={{ tick: fontTick, axis: fontAxis, legend: fontLegend }}
-              appearance={{ height: chartHeight, showGrid, showLegend }}
-              arrangement={arrangement}
+              appearance={{ height: drawnHeight, showGrid, showLegend }}
+              arrangement={drawnArrangement}
               page={page}
               axisOptions={{ ...axisOptions, shared: axisOptions.shared || cellRange === "gating" }}
               channels={channelParts}
+              ridgeline={ridgeline}
             />
           ) : (
             <ProportionsChart
@@ -1552,18 +1806,32 @@ export function PlottingTab({
               facetTitle={proportionsFactorTitle(facetSel)}
               fonts={{ tick: fontTick, axis: fontAxis, legend: fontLegend }}
               appearance={{
-                height: chartHeight,
+                height: drawnHeight,
                 showGrid,
                 showPoints,
                 paired: pairedLines,
                 showLegend,
                 pointRadius,
               }}
-              arrangement={arrangement}
+              arrangement={drawnArrangement}
               page={page}
               axisOptions={axisOptions}
             />
           )}
+          {!(samples.length === 0 || nCat === 0 || !drawable || (cells && !xAxisFrame)) && (
+            <ChartResizeHandle
+              frame={() => chartFrameRef.current}
+              panelWidth={panelWidth}
+              height={chartHeight}
+              onPreview={setDragSize}
+              onCommit={(size) => {
+                setPanelWidth(normalizePanelWidth(size.panelWidth));
+                setChartHeight(size.height);
+              }}
+              onFit={() => setPanelWidth(0)}
+            />
+          )}
+          </div>
           {pages.length > 0 && drawable && nCat > 0 && (
             <div className="gl-prop-pager" role="group" aria-label={t("Pages")}>
               <button className="gl-mini-btn" type="button" disabled={currentPage === 0} aria-label={t("Previous page")} onClick={() => setPageIndex(currentPage - 1)}>
@@ -1579,7 +1847,7 @@ export function PlottingTab({
             </div>
           )}
         </div>
-        {drawable && nCat > 0 && <PlottingDataTableView build={chartDataTable} onDownloadCsv={exportData} />}
+        {(heatmap ? !!heatmapMatrix : drawable && nCat > 0) && <PlottingDataTableView build={chartDataTable} onDownloadCsv={exportData} />}
       </div>
     </div>
   );

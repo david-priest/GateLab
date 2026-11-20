@@ -18,9 +18,23 @@ export function longestLabelWidth(labels: readonly string[], tickFont: number, m
   return Math.max(0, ...labels.map((label) => Math.min(label.length, maxChars) * tickFont * 0.58));
 }
 
-/** Whether the category labels turn: the longest is wider than its slot and than `minWidth`. */
-export function labelsRotate(longestLabelPx: number, step: number, minWidth: number): boolean {
-  return longestLabelPx > step * 0.88 && longestLabelPx > minWidth;
+/** The least room, in pixels, kept between two category labels drawn level side by side. */
+const LABEL_GAP = 4;
+
+/**
+ * Whether the category labels turn: the longest is wider than its slot and than `minWidth`, or,
+ * however short, two labels drawn level (`widths`, one to a slot, an empty slot skipped) would come
+ * closer than the gap.
+ */
+export function labelsRotate(longestLabelPx: number, step: number, minWidth: number, widths: readonly number[] = []): boolean {
+  if (longestLabelPx > step * 0.88 && longestLabelPx > minWidth) return true;
+  let last = -1;
+  for (let i = 0; i < widths.length; i++) {
+    if (!(widths[i] > 0)) continue;
+    if (last >= 0 && (widths[last] + widths[i]) / 2 + LABEL_GAP > (i - last) * step) return true;
+    last = i;
+  }
+  return false;
 }
 
 /**

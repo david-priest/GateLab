@@ -127,7 +127,7 @@ describe("Plotting tab: channel statistic per sample", () => {
     mount(fx);
     chooseStatistic();
     expect([...host.querySelectorAll<HTMLInputElement>('input[name="prop-type"]')].map((input) => input.parentElement!.textContent)).toEqual(["Boxplot", "Bar", "Points"]);
-    expect(host.querySelector('[data-shelf="x"] .gl-figure-dimension > span')?.textContent).toBe("condition");
+    expect(host.querySelector<HTMLInputElement>('input[name="prop-inside"]:checked')?.parentElement?.textContent).toBe("condition");
     expect(panelTitles()).toEqual(["Small", "Large"]);
     const tips = pointTips();
     expect(tips).toHaveLength(8);
@@ -175,7 +175,7 @@ describe("Plotting tab: channel statistic per sample", () => {
     // A panel per population is framed on its own values; a panel per group shares one axis.
     const topTick = () => [...host.querySelectorAll("#gl-prop-svg svg.gl-prop-panel")].map((svg) => [...svg.querySelectorAll('text[text-anchor="end"]')].map((t) => t.textContent).at(-1));
     expect(topTick()).toEqual(["25", "50"]);
-    choose("Place Populations", "x");
+    act(() => [...host.querySelectorAll<HTMLInputElement>('input[name="prop-inside"]')].find((input) => input.parentElement!.textContent === "Populations")!.click());
     expect(topTick()).toEqual(["50", "50"]);
     expect(labelled("Rank test between groups").disabled).toBe(true);
     expect(host.querySelectorAll("#gl-prop-svg .gl-prop-test")).toHaveLength(0);

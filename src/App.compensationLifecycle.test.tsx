@@ -268,5 +268,48 @@ describe("App compensation lifecycle", () => {
     expect(capturedRequest!.targets).toHaveLength(2);
     expect(new Set(capturedRequest!.targets.map(({ sample }) => sample)).size).toBe(2);
     expect(capturedRequest!.targets.every(({ activeLayer }) => activeLayer === "compensated")).toBe(true);
+
+    // The applied matrix is listed in the Matrices list, as a flow matrix is, and stays there when
+    // another replaces it; using it again compensates every file with it.
+    const libraryRows = () => [...host.querySelectorAll<HTMLLIElement>(".gl-comp-lib-row")];
+    expect(libraryRows()).toHaveLength(1);
+    expect(libraryRows()[0].classList.contains("is-active")).toBe(true);
+    // (The mocked Apply installs no layer, so no file counts as using it.)
+    expect(libraryRows()[0].querySelector(".gl-comp-lib-meta")?.textContent).toMatch(/^Imported · wing-lab\.csv · 2 channels/);
+    // No "Calculate from controls…" for CyTOF files.
+    expect(host.querySelector(".gl-comp-lib-calculate")).toBeNull();
+    const firstProfileId = capturedRequest!.profile.profileId;
+
+    const otherText = ["channel,Y89Di,In113Di", "Y89Di,1,0.2", "In113Di,0.05,1"].join("\n");
+    const otherFile = new File([otherText], "wing-lab-2.csv", { type: "text/csv" });
+    if (typeof otherFile.text !== "function") Object.defineProperty(otherFile, "text", { value: async () => otherText });
+    const replaceInput = host.querySelector<HTMLInputElement>('input[aria-label="Choose CyTOF spillover matrix"]')!;
+    Object.defineProperty(replaceInput, "files", { configurable: true, value: [otherFile] });
+    await act(async () => {
+      replaceInput.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      [...host.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Apply NNLS compensation")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(capturedRequest!.profile.profileId).not.toBe(firstProfileId);
+    expect(libraryRows()).toHaveLength(2);
+    expect(libraryRows().map((row) => row.classList.contains("is-active"))).toEqual([false, true]);
+
+    act(() => libraryRows()[0].querySelector<HTMLButtonElement>(".gl-comp-lib-use")!.click());
+    const switchDialog = host.querySelector<HTMLElement>(".gl-comp-lib-switch")!;
+    expect(switchDialog.textContent).toContain("Every file in the workspace (2) is compensated with");
+    expect(switchDialog.querySelector('[role="alert"]')).toBeNull();
+    act(() => switchDialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    await act(async () => {
+      [...switchDialog.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Use for the workspace")!.click();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(capturedRequest!.profile.profileId).toBe(firstProfileId);
+    expect(capturedRequest!.targets).toHaveLength(2);
+    expect(libraryRows().map((row) => row.classList.contains("is-active"))).toEqual([true, false]);
   });
 });

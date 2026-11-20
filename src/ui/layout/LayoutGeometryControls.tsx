@@ -4,13 +4,14 @@
 // Distribute buttons. The geometry itself is in layoutGeometry.ts.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { layoutItemMinimum, layoutItemZoom, type LayoutItem } from "../../engine/layout";
+import { layoutItemZoom, type LayoutItem } from "../../engine/layout";
 import { useI18n } from "../i18n";
 import { NumberField } from "../NumberField";
 import {
   defaultGridColumns,
   framePatch,
   pxToUnit,
+  typedMinimum,
   unitToPx,
   type FrameField,
   type GridOrder,
@@ -52,7 +53,7 @@ export function LayoutDimensionFields({
   const { t } = useI18n();
   const { unit, setUnit, setKeepRatio } = prefs;
   const keepRatio = prefs.keepRatio || ratioLocked;
-  const minimum = layoutItemMinimum(item.recipe.kind);
+  const minimum = typedMinimum(item.recipe.kind);
   const shift = (name: FrameField) => (name === "x" ? origin.x : name === "y" ? origin.y : 0);
   const field = (name: FrameField) => (
     <label key={name}>

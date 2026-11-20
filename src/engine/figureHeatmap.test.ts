@@ -43,6 +43,27 @@ describe("hclustAverage", () => {
   });
 });
 
+describe("buildHeatmapMatrix with a plot of several channels", () => {
+  it("gives each of a plot's channels a column, after which the next plot's follow, and reads a one-channel panel as before", () => {
+    const multi = { ...plot("panel"), x: "CD3", channels: ["CD3", "CD19", "CD56"] };
+    const pg = page(["A", "B"], [multi, plot("CD45")]);
+    const panels: Record<string, FigurePanelData> = {
+      "A|panel": { mappings: [], config: { figure_summary: 5, n_events: 10, channel_summaries: [5, 1, null], channel_quantiles: [[4, 6], [0, 2], []] } },
+      "B|panel": { mappings: [], config: { figure_summary: 2, n_events: 20, channel_summaries: [2, 3, 4], channel_quantiles: [[1, 3], [2, 4], [3, 5]] } },
+      ...data({ "A|CD45": { value: 7, count: 10 }, "B|CD45": { value: 8, count: 20 } }),
+    };
+    const m = buildHeatmapMatrix(pg, panels, { heatmapScale: "none" } as never)!;
+    expect(m.columns.map((c) => [c.label, c.plotId, c.channelIndex])).toEqual([["CD3", "panel", 0], ["CD19", "panel", 1], ["CD56", "panel", 2], ["CD45", "CD45", 0]]);
+    expect(new Set(m.columns.map((c) => c.key)).size).toBe(4);
+    expect(m.raw).toEqual([[5, 1, null, 7], [2, 3, 4, 8]]);
+    expect(m.rows[0].panelKeys).toEqual(["A|panel", "A|panel", "A|panel", "A|CD45"]);
+    const q = buildHeatmapMatrix(pg, panels, { heatmapScale: "column_quantile" } as never)!;
+    // CD56 has events in B alone; its one value sits inside its own sketch.
+    expect(q.scaled[0][2]).toBeNull();
+    expect(q.scaled[1][2]).toBeCloseTo(0.5, 6);
+  });
+});
+
 describe("buildHeatmapMatrix", () => {
   const pg = page(["A", "B", "C"], [plot("CD3"), plot("CD19")]);
   const panels = data({

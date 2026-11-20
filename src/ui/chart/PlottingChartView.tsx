@@ -149,6 +149,7 @@ export function PlottingChartView({
         page={page}
         axisOptions={cellAxisOptions(settings)}
         channels={drawnParts}
+        ridgeline={settings.ridgeline}
       />
     );
   }

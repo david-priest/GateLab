@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
-import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchControlUnderlay, patchCytofForGateLab, patchMiniPlot, patchOverlayDrawOrder, patchPlotWidthFloor, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
+import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchControlUnderlay, patchCytofForGateLab, patchMiniPlot, patchExactPlotSize, patchNoOuterTicks, patchPlotSide, patchOverlayDrawOrder, patchPlotWidthFloor, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
 
 describe("GateLab cytof plot width", () => {
   it("lets the plot shrink to 300 px so it fits a phone's width", () => {
@@ -13,6 +13,46 @@ describe("GateLab cytof plot width", () => {
     // Idempotent, and part of the full patch set.
     expect(patchPlotWidthFloor(patched)).toBe(patched);
     expect(patchCytofForGateLab(cytofSrc)).toContain("Math.max(300, _availW - 32)");
+    warn.mockRestore();
+  });
+});
+
+describe("GateLab cytof exact plot size", () => {
+  it("lays a plot marked data-exact-size out again at any change of width, measured against the 300 px floor", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchExactPlotSize(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain("Math.abs(_targetW - PLOT_W) > (ctnr.hasAttribute('data-exact-size') ? 0 : 30)) _init();");
+    expect(patched).toContain("var _targetW = Math.min(Math.max(300, _chkW - 32), 630);");
+    expect(patchExactPlotSize(patched)).toBe(patched);
+    expect(patchCytofForGateLab(cytofSrc)).toContain("data-exact-size");
+    warn.mockRestore();
+  });
+});
+
+describe("GateLab cytof axis ends", () => {
+  it("draws no outer tick at the ends of the evenly spaced and scatter-log axes", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchNoOuterTicks(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain("d3.axisBottom(zx).ticks(6).tickSizeOuter(0))");
+    expect(patched).toContain("d3.axisLeft(zy).ticks(6).tickSizeOuter(0))");
+    expect(patched.match(/_scatterTickFormat\([xy]ScCf\)\)\.tickSizeOuter\(0\)/g)).toHaveLength(2);
+    expect(patchNoOuterTicks(patched)).toBe(patched);
+    expect(patchCytofForGateLab(cytofSrc)).toContain("d3.axisLeft(zy).ticks(6).tickSizeOuter(0))");
+    warn.mockRestore();
+  });
+});
+
+describe("GateLab cytof plot side", () => {
+  it("draws a container carrying data-plot-side at that side, laid out again when it changes", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const full = patchCytofForGateLab(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(full).toContain("PLOT_W = (ctnr.hasAttribute('data-plot-side') ? Math.max(300, Math.min(1200, Number(ctnr.getAttribute('data-plot-side')) || PLOT_W)) : PLOT_W);");
+    expect(full).toContain("_targetW = (ctnr.hasAttribute('data-plot-side')");
+    expect(full).toContain("ctnr.hasAttribute('data-exact-size') || ctnr.hasAttribute('data-plot-side') ? 0 : 30");
+    expect(patchPlotSide(full)).toBe(full);
     warn.mockRestore();
   });
 });

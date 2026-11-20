@@ -2,9 +2,9 @@
 // from, against the gate list's counts of a quadrant gate drawn on synthetic files D1 to D4
 // (control: D1, D2; treated: D3, D4). Nothing here is a real experiment.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { coreReducer, initialCoreState, recompute, recomputeGating, type CoreState } from "../store";
-import { DEFAULT_HIERARCHY_ID } from "../engine/hierarchies";
+import { cloneHierarchyTree, DEFAULT_HIERARCHY_ID, storeHierarchy } from "../engine/hierarchies";
 import { Sample } from "../engine/sample";
 import type { FcsFile } from "../engine/fcs";
 import { figureHierarchies, type FigureSample } from "../engine/figure";
@@ -15,6 +15,7 @@ import { plotTitleContext } from "../engine/layoutTitle";
 import type { ChartSource } from "./LayoutChart";
 import { legendForItems, readingOrder } from "./layoutLegend";
 import { describeLayoutBlock, exactP, fillSourcePlaceholders, hasSourcePlaceholder, shortList, sizesText, sourceRows, testSentence, type BlockSourceContext } from "./layoutSources";
+import * as pooledStrategy from "../engine/pooledStrategy";
 
 // Each event is [FITC-A (CD4), PE-A (CD8), FSC-A]; the quadrant's centre is at 1000, 1000.
 type Event = [number, number, number];
@@ -113,6 +114,106 @@ describe("A Layout block's source", () => {
     expect(source).toMatchObject({ kind: "strategy", files: ["D1.fcs", "D2.fcs"], populations: ["CD4 SP"], counts: [fx.counted("D1", fx.cd4) + fx.counted("D2", fx.cd4)] });
     expect(source.counts).toEqual([3]);
     expect(source.shows).toContain("in 2 files pooled");
+  });
+
+  it.each([false, true])("of a pooled strategy counts only the files actually drawn (grid: %s)", (grid) => {
+    const fx = fixture();
+    const other = fx.ctx.samples.find((entry) => entry.id === "D2")!;
+    other.sample = new Sample({ ...other.sample.fcs, channels: other.sample.fcs.channels.map((channel, index) => index === 0 ? { ...channel, name: "APC-A" } : channel) });
+    other.derived = recomputeGating(other.sample, fx.state);
+    expect(other.derived.stats.event_count[fx.cd4]).toBe(1);
+    const source = describeLayoutBlock(item({ kind: "strategy", sampleId: "D1", populationId: fx.cd4, ...(grid ? { populationIds: [fx.cd4] } : {}), fullPath: true, displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } }), fx.ctx)!;
+    // D1 has two CD4 SP events; D2's one event cannot join the cloud on D1's channel identities.
+    expect(source).toMatchObject({ files: ["D1.fcs"], populations: ["CD4 SP"], counts: [2] });
+    expect(source.shows).toContain("in 1 of 2 files pooled");
+    expect(source.shows).toContain("D2.fcs (different channel identities)");
+  });
+
+  it("reuses a pooled strategy's eligibility until its prepared source changes", () => {
+    const fx = fixture();
+    const block = item({ kind: "strategy", sampleId: "D1", populationId: fx.cd4, fullPath: true, displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } });
+    const compute = vi.spyOn(pooledStrategy, "computePooledGatingStrategy");
+    try {
+      expect(describeLayoutBlock(block, fx.ctx)?.counts).toEqual([3]);
+      expect(describeLayoutBlock(block, fx.ctx)?.counts).toEqual([3]);
+      expect(compute).toHaveBeenCalledTimes(1);
+      const other = fx.ctx.samples.find((entry) => entry.id === "D2")!;
+      other.sample = new Sample({ ...other.sample.fcs, channels: other.sample.fcs.channels.map((channel, index) => index === 0 ? { ...channel, name: "APC-A" } : channel) });
+      other.derived = recomputeGating(other.sample, fx.state);
+      expect(describeLayoutBlock(block, fx.ctx)?.counts).toEqual([2]);
+      expect(describeLayoutBlock(block, fx.ctx)?.files).toEqual(["D1.fcs"]);
+      expect(compute).toHaveBeenCalledTimes(2);
+    } finally {
+      compute.mockRestore();
+    }
+  });
+
+  it("updates pooled strategy counts after a gate edit on the same prepared source list", () => {
+    const fx = fixture();
+    const block = item({ kind: "strategy", sampleId: "D1", populationId: fx.cd4, fullPath: true, displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } });
+    expect(describeLayoutBlock(block, fx.ctx)?.counts).toEqual([3]);
+    const gate = Object.values(fx.state.gates).find((entry) => entry.gate_type === "quadrant")!;
+    if (gate.gate_type !== "quadrant") throw new Error("the fixture's gate is a quadrant");
+    fx.state.gates[gate.gate_id] = { ...gate, center: [6000, 1000] };
+    for (const source of fx.ctx.samples) source.derived = recomputeGating(source.sample, fx.state);
+    // Every CD4 SP event was at CD4 = 5000, below the moved divider.
+    expect(fx.ctx.samples.slice(0, 2).map((source) => source.derived.stats.event_count[fx.cd4])).toEqual([0, 0]);
+    expect(describeLayoutBlock(block, fx.ctx)).toMatchObject({ files: ["D1.fcs", "D2.fcs"], counts: [0] });
+  });
+
+  it("rechecks pooled strategy eligibility after its assay changes and returns", () => {
+    const fx = fixture();
+    const other = fx.ctx.samples.find((entry) => entry.id === "D2")!;
+    other.sample = new Sample({ ...other.sample.fcs, spillover: { channels: ["FITC-A", "PE-A"], matrix: [[1, 0.01], [0, 1]] } });
+    const block = item({ kind: "strategy", sampleId: "D1", populationId: fx.cd4, fullPath: true, displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } });
+    expect(describeLayoutBlock(block, fx.ctx)?.counts).toEqual([3]);
+    other.sample.setCompensation(true);
+    other.derived = recomputeGating(other.sample, fx.state);
+    expect(other.sample.activeLayer).toBe("compensated");
+    expect(other.derived.stats.event_count[fx.cd4]).toBe(1);
+    const excluded = describeLayoutBlock(block, fx.ctx)!;
+    expect(excluded).toMatchObject({ files: ["D1.fcs"], counts: [2] });
+    expect(excluded.shows).toContain("D2.fcs (different assay layer)");
+    other.sample.setCompensation(false);
+    other.derived = recomputeGating(other.sample, fx.state);
+    expect(describeLayoutBlock(block, fx.ctx)).toMatchObject({ files: ["D1.fcs", "D2.fcs"], counts: [3] });
+  });
+
+  it("rechecks a strip's eligibility after a file's population path changes", () => {
+    const fx = fixture();
+    const block = item({ kind: "strategy", sampleId: "D1", populationId: fx.cd4, fullPath: true, displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } });
+    expect(describeLayoutBlock(block, fx.ctx)?.counts).toEqual([3]);
+    const other = fx.ctx.samples.find((entry) => entry.id === "D2")!;
+    const population = other.tree.populations[fx.cd4];
+    // Repeating the same AND reference retains D2's one event, but gives it a different path.
+    other.tree = { ...other.tree, id: "D2-path", populations: { ...other.tree.populations, [fx.cd4]: { ...population, gate_refs: [...population.gate_refs, ...population.gate_refs] } } };
+    fx.state.hierarchies.push({ id: other.tree.id, name: "D2 path" });
+    fx.state.stored_hierarchies[other.tree.id] = other.tree;
+    other.derived = recomputeGating(other.sample, { ...fx.state, ...other.tree });
+    expect(other.derived.stats.event_count[fx.cd4]).toBe(1);
+    const source = describeLayoutBlock(block, fx.ctx)!;
+    expect(source).toMatchObject({ files: ["D1.fcs"], counts: [2] });
+    expect(source.shows).toContain("D2.fcs (its gating path differs)");
+  });
+
+  it.each([false, true])("follows a template population into the pool's reference tree (grid: %s)", (grid) => {
+    const fx = fixture();
+    const other = fx.ctx.samples.find((entry) => entry.id === "D2")!;
+    const copy = cloneHierarchyTree(fx.state.populations, fx.state.root_population_id!, fx.state.gates, fx.state.gate_order);
+    other.tree = {
+      ...storeHierarchy({ id: "D2-copy", name: "D2 copy" }, { ...fx.state, ...copy }),
+      source_hierarchy_id: DEFAULT_HIERARCHY_ID,
+      source_population_ids: Object.fromEntries(Object.entries(copy.idMap).map(([from, to]) => [to, from])),
+      source_gate_ids: Object.fromEntries(Object.entries(copy.gateIdMap).map(([from, to]) => [to, from])),
+    };
+    fx.state.hierarchies.push({ id: other.tree.id, name: other.tree.name });
+    fx.state.stored_hierarchies[other.tree.id] = other.tree;
+    other.sample = new Sample({ ...other.sample.fcs, channels: other.sample.fcs.channels.map((channel, index) => index === 0 ? { ...channel, name: "APC-A" } : channel) });
+    other.derived = recomputeGating(other.sample, { ...fx.state, ...other.tree });
+    // Pool order starts at D1, but the reference is D2. Its copied CD4 SP population holds one.
+    const source = describeLayoutBlock({ ...item({ kind: "strategy", sampleId: "D2", populationId: fx.cd4, ...(grid ? { populationIds: [fx.cd4] } : {}), fullPath: true, displayMode: "pseudocolor", pool: { sampleIds: ["D1", "D2"] } }), templateSampleId: "D1" }, fx.ctx)!;
+    expect(source).toMatchObject({ files: ["D2.fcs"], populations: ["CD4 SP"], counts: [1] });
+    expect(source.shows).toContain("D1.fcs (different channel identities)");
   });
 
   it("of a statistic chart gives n replicate units per group and the rank test's p", () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// The Plotting tab's named charts: the picker, New chart, Duplicate, Rename and Delete, and undo
-// and redo. Synthetic samples D1 and D2 on one tree; nothing here is a real experiment.
+// The Plotting tab's named charts: a tab each, with New chart (+), and Duplicate, Rename, Move and
+// Delete from a tab's menu, and undo and redo. Synthetic samples D1 and D2 on one tree; nothing here is a real experiment.
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -92,16 +92,21 @@ const checkbox = (label: string) =>
   [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.trim() === label)!.querySelector("input")!;
 const fieldInput = (label: string) =>
   [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.trim().startsWith(label))!.querySelector("input")!;
-const picker = () => host.querySelector<HTMLSelectElement>('select[aria-label="Chart"]')!;
-const chartNames = () => [...picker().options].map((option) => option.textContent);
-const held = (field: string) => readPersistedTabValues(`prop.${field}`)[`prop.${field}`];
-
-function choose(select: HTMLSelectElement, value: string) {
-  act(() => {
-    select.value = value;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+const tabs = () => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+const chartNames = () => tabs().map((tab) => tab.textContent);
+const shownChart = () => tabs().find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent;
+const tab = (name: string) => tabs().find((each) => each.textContent === name)!;
+const showChart = (name: string) => act(() => tab(name).click());
+const newChart = () => act(() => host.querySelector<HTMLButtonElement>('button[aria-label="New chart"]')!.click());
+/** The tab's right-click menu item: clicked, or only found when `click` is false. */
+function tabMenu(name: string, item: string, click = true) {
+  act(() => { tab(name).dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })); });
+  const entry = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.trim() === item)!;
+  if (click) act(() => entry.click());
+  else act(() => { document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+  return entry;
 }
+const held = (field: string) => readPersistedTabValues(`prop.${field}`)[`prop.${field}`];
 
 /** A spinner click: a whole value, committed at once, with the field focused. */
 function spin(input: HTMLInputElement, value: string) {
@@ -118,12 +123,13 @@ function key(init: KeyboardEventInit) {
 }
 
 describe("Plotting charts", () => {
-  it("shows one chart named Chart 1 at the top of the side panel, which cannot be deleted", () => {
+  it("shows one chart named Chart 1 as a tab above the chart, which cannot be deleted", () => {
     render(fixture());
-    const panel = host.querySelector(".gl-plotting-inspector")!;
-    expect(panel.firstElementChild?.classList.contains("gl-plotting-charts")).toBe(true);
+    const strip = host.querySelector(".gl-sheet-tabs")!;
+    expect(strip.nextElementSibling?.classList.contains("gl-plotting-workspace")).toBe(true);
     expect(chartNames()).toEqual(["Chart 1"]);
-    expect(button("Delete").disabled).toBe(true);
+    expect(shownChart()).toBe("Chart 1");
+    expect(tabMenu("Chart 1", "Delete", false).disabled).toBe(true);
     expect(button("Undo").disabled).toBe(true);
     expect(button("Redo").disabled).toBe(true);
   });
@@ -133,14 +139,14 @@ describe("Plotting charts", () => {
     render(fixture(), onConfigChange);
     act(() => checkbox("Grid lines").click());
     expect(held("grid")).toBe(false);
-    act(() => button("New chart").click());
+    newChart();
     expect(chartNames()).toEqual(["Chart 1", "Chart 2"]);
-    expect(picker().value).toBe(picker().options[1].value);
+    expect(shownChart()).toBe("Chart 2");
     expect(checkbox("Grid lines").checked).toBe(true);
     expect(held("grid")).toBe(true);
     // Back to the first chart: its own setting, and no step for the switch.
     const steps = plottingCharts();
-    choose(picker(), "chart-1");
+    showChart("Chart 1");
     expect(checkbox("Grid lines").checked).toBe(false);
     act(() => button("Undo").click());
     // The undo took back the new chart, not the switch.
@@ -148,11 +154,12 @@ describe("Plotting charts", () => {
     expect(steps.charts).toHaveLength(2);
     act(() => button("Redo").click());
     expect(chartNames()).toEqual(["Chart 1", "Chart 2"]);
-    choose(picker(), "chart-1");
-    act(() => button("Duplicate").click());
+    showChart("Chart 1");
+    tabMenu("Chart 1", "Duplicate");
     expect(chartNames()).toEqual(["Chart 1", "Chart 1 copy", "Chart 2"]);
+    expect(shownChart()).toBe("Chart 1 copy");
     expect(checkbox("Grid lines").checked).toBe(false);
-    expect(button("Delete").disabled).toBe(false);
+    expect(tabMenu("Chart 1 copy", "Delete", false).disabled).toBe(false);
     expect(onConfigChange).toHaveBeenCalled();
   });
 
@@ -161,7 +168,7 @@ describe("Plotting charts", () => {
     expect(plottingCharts().charts[0].plotting["prop.followFigureStyle"]).toBe(true);
     render(fixture());
     expect(held("followFigureStyle")).toBe(true);
-    act(() => button("New chart").click());
+    newChart();
     expect(held("followFigureStyle")).toBe(true);
     // A workspace saved before the style: its chart keeps its own sizes, saved as such.
     restorePlottingCharts(workspacePlottingCharts({ plotting: { "prop.fontTick": 12 } }));
@@ -171,19 +178,19 @@ describe("Plotting charts", () => {
 
   it("renames and deletes the shown chart, each as one step", () => {
     render(fixture());
-    act(() => button("New chart").click());
-    act(() => button("Rename").click());
-    const name = host.querySelector<HTMLInputElement>('input[aria-label="Chart name"]')!;
+    newChart();
+    act(() => tab("Chart 2").dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    const name = host.querySelector<HTMLInputElement>('input[aria-label="Name"]')!;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     act(() => { setter.call(name, "treated"); name.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
     act(() => name.blur());
     expect(chartNames()).toEqual(["Chart 1", "treated"]);
-    act(() => button("Delete").click());
+    tabMenu("treated", "Delete");
     expect(chartNames()).toEqual(["Chart 1"]);
-    expect(button("Delete").disabled).toBe(true);
+    expect(tabMenu("Chart 1", "Delete", false).disabled).toBe(true);
     act(() => button("Undo").click());
     expect(chartNames()).toEqual(["Chart 1", "treated"]);
-    expect(picker().selectedOptions[0].textContent).toBe("treated");
+    expect(shownChart()).toBe("treated");
     act(() => button("Undo").click());
     expect(chartNames()).toEqual(["Chart 1", "Chart 2"]);
   });
@@ -247,15 +254,52 @@ describe("Plotting charts", () => {
     expect(canUndoPlotting()).toBe(true);
     render(fx);
     expect(chartNames()).toEqual(["control", "treated", "treated (2)"]);
-    expect(picker().selectedOptions[0].textContent).toBe("treated (2)");
+    expect(shownChart()).toBe("treated (2)");
     expect(held("files")).toEqual(["D1"]);
-    choose(picker(), "chart-b");
+    showChart("treated");
     expect(checkbox("Show legend").checked).toBe(false);
     expect(checkbox("Grid lines").checked).toBe(true);
     // Undo takes back the chart the Layout block made; the one it was opened over is untouched.
     act(() => button("Undo").click());
     expect(chartNames()).toEqual(["control", "treated"]);
-    expect(picker().value).toBe("chart-b");
+    expect(shownChart()).toBe("treated");
     expect(held("legend")).toBe(false);
+  });
+
+  it("shows the chart a Layout block made when the block is opened again, rather than adding another", () => {
+    const fx = fixture();
+    restorePlottingCharts(workspacePlottingCharts({
+      plottingCharts: { activeId: "chart-a", charts: [{ id: "chart-a", name: "treated", plotting: { "prop.legend": false } }] },
+    }));
+    const block = { ...BASE_PROPORTIONS_SETTINGS, files: ["D1", "D2"], selectedPops: [fx.childId], points: false };
+    openPlottingSettingsAsChart(block, "treated");
+    const made = plottingCharts().activeId;
+    // Another chart shown in between; the block opened again shows its chart, unchanged.
+    restorePlottingCharts({ ...plottingCharts(), activeId: "chart-a" });
+    openPlottingSettingsAsChart(structuredClone(block), "treated");
+    expect(plottingCharts().charts.map((chart) => chart.name)).toEqual(["treated", "treated (2)"]);
+    expect(plottingCharts().activeId).toBe(made);
+    // A block whose settings differ from every chart of its name is still added as a chart of its own.
+    openPlottingSettingsAsChart({ ...block, files: ["D2"] }, "treated");
+    expect(plottingCharts().charts.map((chart) => chart.name)).toEqual(["treated", "treated (2)", "treated (3)"]);
+  });
+
+  it("renames, moves and deletes a chart that is not shown without changing the one shown, each as one step", () => {
+    render(fixture());
+    act(() => checkbox("Grid lines").click());
+    newChart();
+    newChart();
+    showChart("Chart 1");
+    tabMenu("Chart 3", "Move left");
+    expect(chartNames()).toEqual(["Chart 1", "Chart 3", "Chart 2"]);
+    tabMenu("Chart 2", "Delete");
+    expect(chartNames()).toEqual(["Chart 1", "Chart 3"]);
+    expect(shownChart()).toBe("Chart 1");
+    expect(checkbox("Grid lines").checked).toBe(false);
+    act(() => button("Undo").click());
+    expect(chartNames()).toEqual(["Chart 1", "Chart 3", "Chart 2"]);
+    act(() => button("Undo").click());
+    expect(chartNames()).toEqual(["Chart 1", "Chart 2", "Chart 3"]);
+    expect(shownChart()).toBe("Chart 1");
   });
 });

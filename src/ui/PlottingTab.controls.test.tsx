@@ -14,6 +14,7 @@ import { I18nProvider } from "./i18n";
 import { composeProportionsChartSvg, divisionWithinName, PlottingTab, proportionsValueTitle } from "./PlottingTab";
 import { clearPersistedTabState, readPersistedTabValues, readProportionsSettings, restorePlottingState } from "./tabState";
 import { BASE_PROPORTIONS_SETTINGS } from "../engine/proportionsSettings";
+import { LayoutProportionsSurface } from "./LayoutProportions";
 
 let root: Root;
 let host: HTMLDivElement;
@@ -304,7 +305,63 @@ describe("Plotting tab controls", () => {
       "Proportions",
       "Channel per cell (violins, boxes)",
       "Channel statistic per sample (points, bars)",
+      "Summary heatmap (populations × channels)",
     ]);
+  });
+
+  it("draws a summary heatmap, a row per population in each file, that the export and the data table take", async () => {
+    const fx = fixture();
+    render(fx);
+    const radio = [...host.querySelectorAll<HTMLInputElement>('input[name="prop-value"]')].find((r) => r.closest("label")!.textContent?.includes("Summary heatmap"))!;
+    act(() => radio.click());
+    await vi.waitFor(() => expect(host.querySelector("#gl-prop-svg svg.gl-prop-panel")).not.toBeNull(), { timeout: 3000 });
+    // Lymphocytes in D1 and D2, one channel (FSC-A, the per-cell default).
+    const labels = [...host.querySelectorAll("#gl-prop-svg .gl-figure-heatmap text")].map((node) => node.textContent);
+    expect(labels).toEqual(expect.arrayContaining(["Lymphocytes · D1.fcs", "Lymphocytes · D2.fcs", "FSC-A"]));
+    expect(composeProportionsChartSvg("gl-prop-svg")).not.toBeNull();
+    expect(readProportionsSettings(BASE_PROPORTIONS_SETTINGS).valueKind).toBe("heatmap");
+    // The proportion controls and the panel shelves are not offered for it.
+    expect(host.textContent).not.toContain("Arrange dimensions");
+    expect(host.querySelector('select[aria-label="Heatmap scale"]')).not.toBeNull();
+    // A channel ticked under More channels is a column of its own.
+    const more = [...host.querySelectorAll<HTMLLabelElement>(".gl-prop-channels label")].find((l) => l.textContent === "SSC-A")!;
+    act(() => more.querySelector("input")!.click());
+    await vi.waitFor(() => expect([...host.querySelectorAll("#gl-prop-svg .gl-figure-heatmap text")].map((node) => node.textContent)).toEqual(expect.arrayContaining(["FSC-A", "SSC-A"])), { timeout: 3000 });
+    expect(readProportionsSettings(BASE_PROPORTIONS_SETTINGS).channels).toEqual(["FSC-A", "SSC-A"]);
+  });
+
+  it("puts a summary heatmap on a Layout sheet as the heatmap it draws here", async () => {
+    const fx = fixture();
+    const settings = {
+      ...BASE_PROPORTIONS_SETTINGS,
+      valueKind: "heatmap" as const,
+      plotType: "heatmap" as const,
+      files: ["D1", "D2"],
+      hierarchy: fx.state.active_hierarchy_id,
+      parent: fx.state.root_population_id!,
+      selectedPops: [fx.childId],
+      channel: "SSC-A",
+      channels: ["SSC-A", "FSC-A"],
+    };
+    act(() =>
+      root.render(
+        <I18nProvider>
+          <LayoutProportionsSurface
+            recipe={{ kind: "proportions", settings }}
+            samples={fx.samples.map((s) => ({ ...s, metadata: {} }))}
+            state={fx.state}
+            metadataById={{}}
+            divisionProfiles={{}}
+            width={600}
+            height={400}
+            containerId="layout-heatmap"
+          />
+        </I18nProvider>,
+      ),
+    );
+    await vi.waitFor(() => expect(host.querySelector("#layout-heatmap svg.gl-prop-panel")).not.toBeNull(), { timeout: 3000 });
+    const labels = [...host.querySelectorAll("#layout-heatmap text")].map((node) => node.textContent);
+    expect(labels).toEqual(expect.arrayContaining(["Lymphocytes · D1.fcs", "SSC-A", "FSC-A"]));
   });
 
   it("names what a percentage is of on the value axis", () => {

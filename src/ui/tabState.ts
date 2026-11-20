@@ -12,7 +12,7 @@
 
 import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { OVERLAY_PALETTES } from "../engine/palettes";
-import { normalizePanelWidth, normalizeProportionsSettings, type ProportionsSettings } from "../engine/proportionsSettings";
+import { normalizePanelWidth, normalizeProportionsSettings, normalizeRidgelineStyle, type ProportionsSettings } from "../engine/proportionsSettings";
 import { FIRST_PLOTTING_CHART, type WorkspacePlottingCharts } from "../engine/workspace";
 
 const store: Record<string, unknown> = {};
@@ -73,8 +73,10 @@ export function restorePlottingState(value: unknown): void {
   const entries = value as Record<string, unknown>;
   const enums: Record<string, string[]> = {
     categoryKind: ["population", "division"],
-    valueKind: ["proportion", "cells", "statistic"],
-    plotType: ["stacked", "box", "violin", "bar", "dots", "splitViolin", "ridgeline"],
+    valueKind: ["proportion", "cells", "statistic", "heatmap"],
+    plotType: ["stacked", "box", "violin", "bar", "dots", "splitViolin", "ridgeline", "heatmap"],
+    heatmapScale: ["none", "column_quantile", "column_minmax", "row_minmax", "column_zscore"],
+    heatmapPalette: ["rdylbu", "blue_white_yellow_red", "viridis", "heat"],
     statistic: ["median", "mean", "geomean"],
     errorBar: ["sd", "sem"],
     proportionValue: ["parent", "total", "count"],
@@ -95,6 +97,7 @@ export function restorePlottingState(value: unknown): void {
     height: [140, 800],
     pointRadius: [0.5, 5],
     panelsPerRow: [1, 12],
+    heatmapCellSize: [12, 120],
   };
   for (const [key, item] of Object.entries(entries)) {
     if (!key.startsWith("prop.")) continue;
@@ -117,6 +120,9 @@ export function restorePlottingState(value: unknown): void {
         "followFigureStyle",
         "colourByPopulation",
         "populationsTogether",
+        "heatmapClusterRows",
+        "heatmapClusterColumns",
+        "heatmapShowValues",
       ].includes(field) &&
         typeof item === "boolean") ||
       (["selectedPops", "files", "channels"].includes(field) &&
@@ -130,6 +136,8 @@ export function restorePlottingState(value: unknown): void {
       store[key] = item;
     else if (["valueMin", "valueMax"].includes(field) && typeof item === "number" && Number.isFinite(item))
       store[key] = item;
+    else if (field === "ridgeline" && normalizeRidgelineStyle(item))
+      store[key] = normalizeRidgelineStyle(item);
     else if (field === "panelWidth" && typeof item === "number" && Number.isFinite(item))
       store[key] = normalizePanelWidth(item);
     else if (
@@ -256,9 +264,23 @@ export function newPlottingChartName(list: WorkspacePlottingCharts): string {
   return `Chart ${n}`;
 }
 
-/** Settings from elsewhere (a Layout block) as a new chart, shown, as one undo step. */
+/**
+ * Settings from elsewhere (a Layout block) as a new chart, shown, as one undo step. A chart of that
+ * name (or a numbered copy of it) already drawing the same settings is shown instead, so opening
+ * the same block again does not add a duplicate.
+ */
 export function openPlottingSettingsAsChart(settings: ProportionsSettings, name: string): void {
   const list = plottingCharts();
+  // Settings without followFigureStyle draw at their own sizes, as showPlottingCharts shows them.
+  const drawn = (held: object) => JSON.stringify(normalizeProportionsSettings({ followFigureStyle: false, ...held }));
+  const wanted = drawn(settings);
+  const same = list.charts.find((chart) =>
+    chart.name.startsWith(name) && /^( \(\d+\))?$/.test(chart.name.slice(name.length)) &&
+    drawn(Object.fromEntries(Object.entries(chart.plotting).filter(([key]) => key.startsWith("prop.")).map(([key, value]) => [key.slice(5), value]))) === wanted);
+  if (same) {
+    selectPlottingChart(same.id);
+    return;
+  }
   const chart = {
     id: crypto.randomUUID(),
     name: uniquePlottingChartName(list, name),

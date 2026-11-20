@@ -11,6 +11,8 @@ export interface ChartPanelGridOptions {
   font: number;
   /** Each panel's size: a column heading is as wide as its panels, a row heading as tall. */
   panelWidth: number;
+  /** A column's panels' width where the columns differ; `panelWidth` for every column by default. */
+  columnWidth?: (column: number) => number;
   panelHeight: number;
 }
 
@@ -45,7 +47,7 @@ export function chartGridCells<T>(
   const size = headingSizes(placed, options.font);
   const cells: ReactNode[] = [<div key="corner" className="gl-prop-panel-empty" aria-hidden="true" />];
   headings.columns.forEach((text, c) =>
-    cells.push(<Heading key={`column-${c}`} text={text} width={options.panelWidth} height={size.top} font={options.font} side="column" />),
+    cells.push(<Heading key={`column-${c}`} text={text} width={options.columnWidth?.(c) ?? options.panelWidth} height={size.top} font={options.font} side="column" />),
   );
   headings.rows.forEach((text, r) => {
     cells.push(<Heading key={`row-${r}`} text={text} width={size.left} height={options.panelHeight} font={options.font} side="row" />);

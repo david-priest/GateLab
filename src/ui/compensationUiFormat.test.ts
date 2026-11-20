@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   compensationMatrixCellAppearance,
+  isMarkerNamedChannel,
   percentText,
   significantNumber,
 } from "./compensationUiFormat";
@@ -32,5 +33,20 @@ describe("compensation UI formatting", () => {
       backgroundColor: "#ae3e3e",
       color: "#ffffff",
     });
+  });
+});
+
+describe("a mass-cytometry channel with a marker name", () => {
+  it("is named when its name says more than its isotope", () => {
+    for (const [name, pnn] of [["141Pr_CCR6", "Pr141Di"], ["103Rh_DNA", "Rh103Di"], ["CD45", "Y89Di"], ["Pr141_CCR6", "Pr141Di"], ["191Ir DNA1", "Ir191Di"]]) {
+      expect(isMarkerNamedChannel(name, pnn), name).toBe(true);
+    }
+  });
+
+  it("is not named when its name is empty, its $PnN, or an isotope only", () => {
+    const unnamed: [string | null, string][] = [["", "Cs133Di"], [null, "Cs133Di"], ["Cs133Di", "Cs133Di"], ["131Xe", "Xe131Di"], ["140Ce", "Ce140Di"], [" 127I ", "I127Di"], ["Pb208Di", "Pb208Di"], ["120Sn_", "Sn120Di"], ["(Gd157Di)", "Gd157Di"]];
+    for (const [name, pnn] of unnamed) {
+      expect(isMarkerNamedChannel(name, pnn), String(name)).toBe(false);
+    }
   });
 });

@@ -110,7 +110,7 @@ import {
   buildPooledStrategyPayload,
 } from "../engine/strategy";
 import { buildMultiStrategyPayload, computeMultiPopStrategy, flowLayout, tidyLayout } from "../engine/multiStrategy";
-import { computePooledGatingStrategy, computePooledMultiPopStrategy, type StrategyMember } from "../engine/pooledStrategy";
+import { computePooledGatingStrategy, computePooledMultiPopStrategy } from "../engine/pooledStrategy";
 import { drawStrategyArrows, reserveArrowGutters, strategyArrowGap, strategyArrowRowGap, strategyArrows } from "./strategyArrows";
 import { strategyFrames } from "./strategyFrames";
 import { populationTreeOrder } from "../engine/populations";
@@ -142,7 +142,7 @@ import { chartToPlottingRecipe, quickStartPlottingRecipe } from "./layoutChartCo
 import { statisticTitle } from "./StatisticChart";
 import type { DivisionProfileLike } from "../engine/factors";
 import type { ProportionsSettings } from "../engine/proportionsModel";
-import { describeLayoutBlock, fillSourcePlaceholders, hasSourcePlaceholder, withSourceFields, type BlockSource } from "./layoutSources";
+import { describeLayoutBlock, drawnStrategyPool, fillSourcePlaceholders, hasSourcePlaceholder, strategyPoolMembers, withSourceFields, type BlockSource } from "./layoutSources";
 import { LayoutLegendMark, LayoutSourceHover, LayoutSourcePanel } from "./LayoutSourcePanel";
 import { legendDate, legendTextBlock } from "./layoutLegend";
 import type { LayoutShapeRecipe } from "../engine/shapeBlock";
@@ -343,27 +343,6 @@ function poolOf(recipe: LayoutRecipe): string[] | null {
   return (recipe.kind === "biplot" || recipe.kind === "histogram" || recipe.kind === "strategy") && recipe.pool && recipe.pool.sampleIds.length > 1
     ? recipe.pool.sampleIds
     : null;
-}
-
-/**
- * The files a pooled strategy draws, the reference file first, each with the strategy's population
- * followed into its own tree ("" where it has none), as the Strategy tab prepares its pool; the
- * pooled strategy leaves out the files that cannot join it (engine/pooledStrategy.ts).
- */
-function strategyPoolMembers(
-  recipe: LayoutStrategyRecipe,
-  samples: readonly LayoutSampleView[],
-  trees: Record<string, StoredHierarchy>,
-  templateTreeId?: string,
-): StrategyMember[] {
-  const ids = recipe.pool?.sampleIds ?? [recipe.sampleId];
-  const ordered = ids.includes(recipe.sampleId) ? [recipe.sampleId, ...ids.filter((id) => id !== recipe.sampleId)] : ids;
-  return ordered.flatMap((id) => {
-    const view = samples.find((candidate) => candidate.id === id);
-    if (!view) return [];
-    const resolved = resolvePopulationInTree(recipe.populationId, view.tree, trees, templateTreeId);
-    return [{ id: view.id, name: view.name, sample: view.sample, tree: view.tree, gating: view.derived, populationId: resolved.missing ? "" : resolved.id }];
-  });
 }
 
 /**
@@ -843,11 +822,14 @@ function LayoutPlotSurface({
         const stepCount = Math.max(1, steps.length);
         // A strip sent from the Strategy tab keeps the columns it had there.
         const keptColumns = recipe.columns ? Math.min(recipe.columns, stepCount) : 0;
+        // The frame's own size, not held at 120 px as a plot's is: a strip in a frame smaller than
+        // that fits it shown scaled (below), where held at 120 it was drawn larger and scrolled.
+        const stripWidth = Math.max(1, item.width - 8), stripHeight = Math.max(1, item.height - 8);
         let columns = 1, plotSize = 0;
         for (let candidate = keptColumns || 1; candidate <= (keptColumns || stepCount); candidate++) {
           const rows = Math.ceil(stepCount / candidate);
-          const cellWidth = Math.floor((availableWidth - gap * (candidate - 1)) / candidate);
-          const cellHeight = Math.floor((availableHeight - titleHeight - gap * (rows - 1)) / rows);
+          const cellWidth = Math.floor((stripWidth - gap * (candidate - 1)) / candidate);
+          const cellHeight = Math.floor((stripHeight - titleHeight - gap * (rows - 1)) / rows);
           const size = Math.min(cellWidth, cellHeight);
           if (size > plotSize) { plotSize = size; columns = candidate; }
         }
@@ -1626,7 +1608,11 @@ export function LayoutTab({
   // focus away, and it is given back when the export ends (to the page, if that element is gone).
   const exportFocusRef = useRef<Element | null | undefined>(undefined);
   const startExporting = (value: boolean) => {
-    if (value) exportFocusRef.current = document.activeElement;
+    if (value) {
+      exportFocusRef.current = document.activeElement;
+      // What the last export said is not about this one.
+      setMessage(null);
+    }
     setExporting(value);
   };
   useEffect(() => {
@@ -1746,13 +1732,14 @@ export function LayoutTab({
       // A pool reads as its files: how many, the metadata they share, and the population's
       // events over all of them.
       const poolTreeId = templateSampleId ? samples.find(({ id }) => id === templateSampleId)?.tree.id : undefined;
-      const members: Pick<StrategyMember, "gating" | "populationId">[] = recipe.kind === "strategy" ? strategyPoolMembers(recipe, samples, trees, poolTreeId) : resolvePoolMembers(recipe, samples, trees, poolTreeId).members;
+      const members = recipe.kind === "strategy" ? drawnStrategyPool(recipe, samples, trees, poolTreeId).drawn : resolvePoolMembers(recipe, samples, trees, poolTreeId).members;
       const pooledCount = members.reduce((total, member) => total + (member.gating.stats.event_count[member.populationId] ?? 0), 0);
+      const poolName = recipe.kind === "strategy" && members.length !== pool.length ? `${members.length} of ${pool.length} files` : `${pool.length} files`;
       // A pool drawn for a metadata value is named by the value; a hand-picked one by its size.
       const unit = unitId ? units.find((candidate) => candidate.id === unitId) : undefined;
       return overlayNames(plotTitleContext(
         recipe.kind === "strategy" ? {} : recipe,
-        { name: unit?.sampleIds ? unit.name : `${pool.length} files`, fileName: `${pool.length} files`, metadata: unit?.sampleIds ? unit.metadata : sharedMetadataFields(pool.map((id) => metadataById[id])) },
+        { name: unit?.sampleIds ? unit.name : poolName, fileName: poolName, metadata: unit?.sampleIds ? unit.metadata : sharedMetadataFields((recipe.kind === "strategy" ? members.map((member) => member.id) : pool).map((id) => metadataById[id])) },
         population ? { id: populationId, name: population.name } : null,
         members.length ? pooledCount : undefined,
         populationMetadata,
@@ -3517,7 +3504,12 @@ export function LayoutTab({
                         const item = sheet.items.find(
                           (item) => item.id === selectedItem.id,
                         );
-                        if (item) Object.assign(item, patch);
+                        if (!item) return;
+                        // A typed size is shown scaled below the smallest a plot is drawn, as a dragged one is.
+                        const { zoom } = resizedFrame(item, patch.width ?? item.width, patch.height ?? item.height);
+                        Object.assign(item, patch);
+                        if (zoom === undefined) delete item.zoom;
+                        else item.zoom = zoom;
                       })
                     }
                   />

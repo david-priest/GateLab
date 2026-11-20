@@ -156,6 +156,8 @@ describe("A figure's chart plot holding Plotting settings", () => {
     const decided = [
       "files", "hierarchy", "parent", "selectedPops", "categoryKind", "channel", "channels", "facetSel", "panelColumns",
       "panelRows", "pageBy", "panelsPerRow", "panelWidth", "height", "cellRange", "fontTick", "fontAxis", "fontLegend", "followFigureStyle",
+      // A figure's summary heatmap takes these from the figure's own Style settings.
+      "heatmapScale", "heatmapPalette", "heatmapClusterRows", "heatmapClusterColumns", "heatmapShowValues", "heatmapCellSize",
     ] as const;
     // A setting added to ProportionsSettings without a group fails to compile here.
     type Unclassified = Exclude<keyof ProportionsSettings, (typeof shared)[number] | (typeof decided)[number] | (typeof FIGURE_CHART_SETTING_KEYS)[number]>;
@@ -164,7 +166,7 @@ describe("A figure's chart plot holding Plotting settings", () => {
     const groups = [...shared, ...decided, ...FIGURE_CHART_SETTING_KEYS];
     expect(new Set(groups).size).toBe(groups.length);
     // The optional settings are absent from the defaults; every other one is there.
-    const keys = new Set([...Object.keys(BASE_PROPORTIONS_SETTINGS), "colourByPopulation", "populationsTogether", "followFigureStyle"]);
+    const keys = new Set([...Object.keys(BASE_PROPORTIONS_SETTINGS), "colourByPopulation", "populationsTogether", "followFigureStyle", "ridgeline"]);
     expect([...keys].sort()).toEqual([...groups].sort());
   });
 

@@ -61,6 +61,11 @@ import {
   rankConservativeCompensationAttention,
   type CompensationEvidenceMode,
 } from "../engine/compensationAttention";
+import { screenPairEvents, suggestedCoefficient, type ScreenMatrix } from "../compensationScreen/screenPairs";
+import { CompensationFloorPlot } from "./CompensationFloorPlot";
+import { CompensationScreenPanel } from "./CompensationScreenPanel";
+import { screenPercent, screenReading } from "./compensationScreenText";
+import { useCompensationScreen } from "./useCompensationScreen";
 import {
   buildCompensationGlobalInspectorDataset,
   buildCompensationGlobalPairPreview,
@@ -85,6 +90,7 @@ import { useI18n } from "./i18n";
 import { TabIntro, TabIntroToggle, useTabIntro } from "./TabIntro";
 import {
   compensationMatrixCellAppearance,
+  isMarkerNamedChannel,
   percentText,
   significantNumber,
 } from "./compensationUiFormat";
@@ -108,6 +114,16 @@ const MATRIX_LABEL_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto
 const COLUMN_LABEL_ANGLE = (58 * Math.PI) / 180;
 /** The matrix scroll area's padding, the axis captions and a scrollbar: room the cells cannot use. */
 const MATRIX_STAGE_CHROME = 18 + 18 + 18;
+/**
+ * Cell sizes of the matrix (px). `least` is the smallest it fits to or can be set to, `most` the
+ * largest it fits to, `largest` the largest it can be set to; `budgeted` and `budget` give the
+ * size before the panel is measured. Cells edited in place keep room for their input.
+ */
+const MATRIX_CELL_SIZES = {
+  view: { least: 12, budgeted: 38, most: 44, largest: 72, budget: 760 },
+  inline: { least: 42, budgeted: 54, most: 64, largest: 96, budget: 960 },
+} as const;
+const MATRIX_VALUE_MIN_CELL = 30;
 
 interface Props {
   sample: Sample;
@@ -277,7 +293,7 @@ type FlowCandidatePreviewState =
     }
   | { readonly state: "error"; readonly pairKey: string; readonly message: string };
 
-type CompensationWorkspaceView = "matrix" | "global" | "attention";
+type CompensationWorkspaceView = "matrix" | "global" | "screen" | "attention";
 type CompensationGlobalPairFilter = "relevant" | "nonzero" | "physical" | "flagged" | "all";
 type CompensationGlobalLayout = "compact" | "source" | "receiver" | "matrix";
 /**
@@ -331,6 +347,8 @@ const DRAWERS: ReadonlyArray<Readonly<{ id: DrawerId; label: string }>> = [
 ];
 
 const PAIR_SEPARATOR = "\u001f";
+/** Events the Check view reads; a fixed sample of the review population. */
+const SCREEN_EVENT_LIMIT = 60_000;
 const SWEEP_EVENT_LIMIT = 2_500;
 const BOUNDS_PREVIEW_EVENT_LIMIT = 400;
 const GLOBAL_INSPECTOR_EVENT_LIMIT = 2_500;
@@ -375,6 +393,12 @@ function channelDisplay(sample: Sample, key: string): Readonly<{
   const named = (channel?.label ?? "").trim() || (channel?.marker ?? "").trim();
   const combined = named && named !== pnn ? `${named} (${pnn})` : pnn;
   return { key, pnn, label, combined };
+}
+
+/** The marker name of a channel by $PnN: a Panel-tab rename, else $PnS; empty when it has none. */
+function channelNameForPnn(sample: Sample, pnn: string): string {
+  const channel = sample.channels.find((candidate) => candidate.pnn === pnn);
+  return (channel?.label ?? "").trim() || (channel?.marker ?? "").trim();
 }
 
 function channelDisplayForPnn(sample: Sample, pnn: string): ReturnType<typeof channelDisplay> {
@@ -551,6 +575,7 @@ function profileOriginText(profile: CompensationProfileRecord, translate: (sourc
   if (profile.origin.type === "uploaded") return profile.origin.fileName;
   if (profile.origin.type === "embedded-fcs") return `${profile.origin.fileName} · ${translate("embedded FCS")}`;
   if (profile.origin.type === "manual") return translate("set by hand, from an empty matrix");
+  if (profile.origin.type === "calculated") return translate("calculated from single-stained controls");
   return `${profile.origin.presetId} · ${translate("bundled preset")} ${profile.origin.presetVersion}`;
 }
 
@@ -727,6 +752,7 @@ function CompensationTabImpl({
   const [manualSourceKey, setManualSourceKey] = useState("");
   const [manualReceiverKey, setManualReceiverKey] = useState("");
   const [attentionScanRevision, setAttentionScanRevision] = useState(0);
+  const [screenRevision, setScreenRevision] = useState(0);
   const [stagedCoefficients, setStagedCoefficients] = useState<Record<string, number>>({});
   const [matrixCellDraftPercents, setMatrixCellDraftPercents] = useState<Record<string, string>>({});
   const [flowCandidatePreview, setFlowCandidatePreview] = useState<FlowCandidatePreviewState>({ state: "idle" });
@@ -781,6 +807,8 @@ function CompensationTabImpl({
   // The matrix panel's room for its cells; null until measured, and where nothing is laid out.
   const [matrixScroll, setMatrixScroll] = useState<HTMLDivElement | null>(null);
   const [matrixSpace, setMatrixSpace] = useState<{ width: number; height: number } | null>(null);
+  // The matrix cells' size: fitted to the panel, or a size the user chose (px).
+  const [matrixSizeChoice, setMatrixSizeChoice] = useState<"fit" | number>("fit");
   useEffect(() => {
     if (!matrixScroll || typeof ResizeObserver === "undefined") {
       setMatrixSpace(null);
@@ -1068,7 +1096,8 @@ function CompensationTabImpl({
     // The revision is an explicit user-triggered rescan boundary. Population/sample changes
     // still recompute automatically through their own dependencies.
     void attentionScanRevision;
-    if (!matrixView || installedStatus.state !== "ready") {
+    // A mass-cytometry matrix is read against the events in the Check view (src/compensationScreen).
+    if (!matrixView || matrixView.kind === "cytof" || installedStatus.state !== "ready") {
       return { candidateCount: 0, screenedCount: 0, evaluableCount: 0, items: [] as CompensationEvidenceCandidate[] };
     }
     const candidates: Array<Omit<CompensationEvidenceCandidate, "evidence" | "relativePriority">> = [];
@@ -1079,10 +1108,9 @@ function CompensationTabImpl({
         if (sourceKey === receiverKey) continue;
         const coefficient = matrixView.matrix[sourceIndex][receiverIndex];
         if (!Number.isFinite(coefficient)) continue;
-        const interaction = matrixView.kind === "cytof"
-          ? cytofInteractionType(sourceKey, receiverKey)
-          : null;
-        const physicallyPlausible = interaction !== null && interaction !== "self" && interaction !== "other";
+        // Flow only (see above): no isotope relationship between the channels.
+        const interaction: CytofInteractionType | null = null;
+        const physicallyPlausible = false;
         if (coefficient === 0 && !physicallyPlausible && evidenceMode === "biological") continue;
         candidates.push({
           sourceIndex,
@@ -1451,6 +1479,30 @@ function CompensationTabImpl({
     }
     return Object.freeze(matrix.map((row) => Object.freeze(row)));
   }, [profileRecord, stagedCoefficients]);
+  // The Check view: the working matrix (staged values included) against the stored counts.
+  const screenEventIndices = useMemo(
+    () => deterministicCompensationEventIndices(sample.fcs.nEvents, SCREEN_EVENT_LIMIT, reviewMask),
+    [reviewMask, sample],
+  );
+  const screenMatrix = useMemo<ScreenMatrix | null>(() => {
+    if (!profileRecord || profileRecord.scientific.kind !== "cytof-spillover" || !workingProfileMatrix) return null;
+    return {
+      sourceChannels: profileRecord.scientific.matrix.sourceChannels,
+      receiverChannels: profileRecord.scientific.matrix.receiverChannels,
+      matrix: workingProfileMatrix,
+    };
+  }, [profileRecord, workingProfileMatrix]);
+  const screen = useCompensationScreen({
+    enabled: visible && workspaceView === "screen",
+    sample,
+    eventIndices: screenEventIndices,
+    matrix: screenMatrix,
+    revision: screenRevision,
+  });
+  const screenAttentionCount = useMemo(
+    () => screen.result?.pairs.filter(({ verdict }) => verdict === "above-data" || verdict === "below-floor").length ?? 0,
+    [screen.result],
+  );
   useEffect(() => {
     const editCount = Object.keys(stagedCoefficients).length;
     if (
@@ -1661,24 +1713,28 @@ function CompensationTabImpl({
     const columnLabelHeight = Math.max(88, Math.ceil(columnLabelWidth * Math.sin(COLUMN_LABEL_ANGLE) + 12));
     return { rowLabelWidth, columnLabelWidth, columnLabelHeight };
   }, [flowInlineMatrix, receiverChannels, sourceChannels]);
-  // The cells take the room the matrix panel has, up to a cap, and never draw smaller than the
-  // fixed budget gave them before the panel was measured: a wide window draws a 40-channel CyTOF
-  // matrix at a readable size, and a narrow one scrolls as it always did.
-  const matrixCellSize = matrixView
+  // By default the whole matrix fits the panel: the cells take the room it has along each axis,
+  // up to a cap, and down to a floor at which the values give way to colour alone (each cell still
+  // names its value on hover). A size chosen with the control holds instead, and the panel
+  // scrolls. Before the panel is measured the fixed budget applies.
+  const matrixCellSizes = flowInlineMatrix ? MATRIX_CELL_SIZES.inline : MATRIX_CELL_SIZES.view;
+  const matrixFittedCellSize = matrixView
     ? (() => {
-        const channels = Math.max(matrixView.sourceAxisKeys.length, matrixView.receiverAxisKeys.length);
-        // At least 32 px a cell, so an 11 px value fits: a wide panel scrolls rather than shrinking the type.
-        const [least, budgeted, most, budget] = flowInlineMatrix ? [42, 54, 64, 960] : [32, 38, 44, 760];
-        const before = Math.max(least, Math.min(budgeted, Math.floor(budget / channels)));
-        if (!matrixSpace) return before;
-        const fitted = Math.min(
-          matrixSpace.width - MATRIX_STAGE_CHROME - matrixLabelSizes.rowLabelWidth
-            - matrixLabelSizes.columnLabelWidth * Math.cos(COLUMN_LABEL_ANGLE),
-          matrixSpace.height - MATRIX_STAGE_CHROME - matrixLabelSizes.columnLabelHeight,
-        );
-        return Math.max(before, Math.min(most, Math.floor(fitted / channels)));
+        const sources = Math.max(1, matrixView.sourceAxisKeys.length), receivers = Math.max(1, matrixView.receiverAxisKeys.length);
+        const channels = Math.max(sources, receivers);
+        const { least, budgeted, most, budget } = matrixCellSizes;
+        if (!matrixSpace) return Math.max(least, Math.min(budgeted, Math.floor(budget / channels)));
+        const across = (matrixSpace.width - MATRIX_STAGE_CHROME - matrixLabelSizes.rowLabelWidth
+          - matrixLabelSizes.columnLabelWidth * Math.cos(COLUMN_LABEL_ANGLE)) / receivers;
+        const down = (matrixSpace.height - MATRIX_STAGE_CHROME - matrixLabelSizes.columnLabelHeight) / sources;
+        return Math.max(least, Math.min(most, Math.floor(Math.min(across, down))));
       })()
     : 13;
+  const matrixCellSize = matrixView && matrixSizeChoice !== "fit"
+    ? Math.max(matrixCellSizes.least, Math.min(matrixCellSizes.largest, Math.round(matrixSizeChoice)))
+    : matrixFittedCellSize;
+  // Below this an 11 px value no longer fits its cell, and the cells show colour alone.
+  const matrixValuesShown = matrixCellSize >= MATRIX_VALUE_MIN_CELL;
   const matrixLabelLayout = useMemo(() => ({
     ...matrixLabelSizes,
     // The last column's label leans past the matrix's right edge by its horizontal extent.
@@ -2013,7 +2069,7 @@ function CompensationTabImpl({
     try {
       await onRemoveProfile();
       setActionIsError(false);
-      setActionMessage(t("The matrix was removed. The original assay is active and every file reads its stored values."));
+      setActionMessage(t("No file is compensated: the original assay is active and every file reads its stored values. The matrix stays in the Matrices list."));
     } catch (error) {
       setActionIsError(true);
       setActionMessage(error instanceof Error ? error.message : String(error));
@@ -2549,7 +2605,16 @@ function CompensationTabImpl({
         selectedPair.interaction !== "self" && selectedPair.interaction !== "other"
       ? 1
       : 0;
-    const selectedAssessment = selectedPair && selectedPairPreview?.ready
+    const selectedScreenPair = selectedPair && matrixView!.kind === "cytof"
+      ? screen.result?.pairs.find((pair) => pair.source === selectedSourceKey && pair.receiver === selectedReceiverKey) ?? null
+      : null;
+    const selectedScreenReading = selectedScreenPair ? screenReading(selectedScreenPair) : null;
+    const selectedScreenSuggestion = selectedScreenPair ? suggestedCoefficient(selectedScreenPair) : null;
+    const selectedScreenEvents = selectedScreenPair && screen.data && screenMatrix && workspaceView === "screen"
+      ? screenPairEvents(screen.data, screenMatrix, selectedSourceKey, selectedReceiverKey)
+      : null;
+    // A mass-cytometry pair is read by the Check view; the residual screen below is the flow one.
+    const selectedAssessment = selectedPair && selectedPairPreview?.ready && matrixView!.kind !== "cytof"
       ? assessCompensationEvidence({
           coefficient: selectedPair.value,
           physicalPrior: selectedPhysicalPrior,
@@ -2651,6 +2716,35 @@ function CompensationTabImpl({
                 <strong>{t(selectedAssessment.label)}</strong>
                 <span>{t(selectedAssessment.detail)}</span>
               </div>
+            )}
+            {selectedScreenPair && selectedScreenReading && (
+              <div className={`gl-comp-evidence-badge gl-comp-screen-badge is-${selectedScreenReading.tone}`}>
+                <strong>{t(selectedScreenReading.label)}</strong>
+                <span>
+                  {t(selectedScreenReading.detail, selectedScreenReading.values)}
+                  {selectedScreenPair.receiverUnlabelled
+                    ? ` ${t("The receiver carries no antibody in this file, so only spillover should put counts in it.")}`
+                    : ""}
+                </span>
+                {selectedScreenSuggestion !== null && (
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    disabled={!profileRecord || applyBusy}
+                    onClick={() => stageCoefficient(selectedPair.pairKey, selectedScreenSuggestion)}
+                  >
+                    {t("Stage {value}", { value: screenPercent(selectedScreenSuggestion) })}
+                  </button>
+                )}
+              </div>
+            )}
+            {selectedScreenPair && selectedScreenEvents && (
+              <CompensationFloorPlot
+                pair={selectedScreenPair}
+                events={selectedScreenEvents}
+                sourceLabel={selectedPair.source.label}
+                receiverLabel={selectedPair.receiver.label}
+              />
             )}
             <label className="gl-comp-followup-toggle">
               <input
@@ -3028,7 +3122,7 @@ function CompensationTabImpl({
               type="button"
               className="gl-mini-btn"
               disabled={applyBusy || removingProfile}
-              title={t("Uninstall the matrix: every file returns to the original assay and the matrix leaves the workspace.")}
+              title={t("Every file returns to the original assay. The matrix and its versions stay in the Matrices list, to be used again or deleted there.")}
               onClick={() => void removeInstalledMatrix()}
             >
               {removingProfile ? t("Removing…") : t("Remove the matrix")}
@@ -3054,9 +3148,12 @@ function CompensationTabImpl({
           ))}
         </nav>
         <div className="gl-comp-pane-section gl-comp-pane-matrices">
-        {matrices && sample.instrument === "flow" && (
+        {matrices && (
           <CompensationMatrices
             {...matrices}
+            // A CyTOF matrix is imported through the tab's own import, where its NNLS channels are
+            // chosen before it is applied.
+            {...(sample.instrument === "cytof" ? { chooseImport: chooseCytofMatrix } : {})}
             onEditStarted={(name) => {
               setWorkspaceView("matrix");
               setActionIsError(false);
@@ -3414,6 +3511,20 @@ function CompensationTabImpl({
           >
             {t("Global inspector")}
           </button>
+          {matrixView.kind === "cytof" && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={workspaceView === "screen"}
+              className={workspaceView === "screen" ? "active" : undefined}
+              onClick={() => {
+                setHoveredPairKey(null);
+                setWorkspaceView("screen");
+              }}
+            >
+              {t("Check")}{screen.result && screenAttentionCount > 0 ? ` (${screenAttentionCount})` : ""}
+            </button>
+          )}
           <button
             type="button"
             role="tab"
@@ -3497,6 +3608,15 @@ function CompensationTabImpl({
                     onClick={() => setIncludedCytofChannels(new Set(cytofCompatibility.matchedChannels))}
                   >
                     {t("All matched")}
+                  </button>
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    disabled={applyBusy}
+                    title={t("Include only the matched channels that carry a marker name, leaving out those named by their isotope alone (such as 131Xe or 133Cs) or not named at all")}
+                    onClick={() => setIncludedCytofChannels(new Set(cytofCompatibility.matchedChannels.filter((pnn) => isMarkerNamedChannel(channelNameForPnn(sample, pnn), pnn))))}
+                  >
+                    {t("Named only")}
                   </button>
                   <button
                     type="button"
@@ -3708,6 +3828,27 @@ function CompensationTabImpl({
                 <span>{t(matrixView.subtitle)}</span>
               </div>
               <div className="gl-comp-matrix-head-actions">
+                <div className="gl-comp-matrix-size" role="group" aria-label={t("Matrix size")}>
+                  <button
+                    type="button"
+                    className="gl-mini-btn"
+                    aria-pressed={matrixSizeChoice === "fit"}
+                    title={t("Fit the whole matrix to the panel; where the cells are too small for their values they show colour alone, and each names its value on hover")}
+                    onClick={() => setMatrixSizeChoice("fit")}
+                  >
+                    {t("Fit")}
+                  </button>
+                  <input
+                    type="range"
+                    min={matrixCellSizes.least}
+                    max={matrixCellSizes.largest}
+                    step={1}
+                    value={matrixCellSize}
+                    aria-label={t("Cell size")}
+                    title={t("Cell size: {size} px", { size: matrixCellSize })}
+                    onChange={(event) => setMatrixSizeChoice(Number(event.currentTarget.value))}
+                  />
+                </div>
                 {flowInlineMatrix && (
                   <span className="gl-comp-inline-edit-note">{t("Edit cells directly (%)")}</span>
                 )}
@@ -3727,7 +3868,7 @@ function CompensationTabImpl({
             </div>
             <div className="gl-comp-matrix-scroll" ref={setMatrixScroll}>
               <div
-                className={`gl-comp-matrix-stage${flowInlineMatrix ? " is-flow-inline" : ""}`}
+                className={`gl-comp-matrix-stage${flowInlineMatrix ? " is-flow-inline" : ""}${matrixValuesShown ? "" : " is-values-hidden"}`}
                 style={{
                   width: 18 + matrixLabelLayout.rowLabelWidth
                     + matrixView.receiverAxisKeys.length * matrixCellSize
@@ -4116,6 +4257,33 @@ function CompensationTabImpl({
           {globalInspectorDetailsOpen && renderInspectorResizeHandle()}
           {globalInspectorDetailsOpen && renderPairInspector(() => setGlobalInspectorDetailsOpen(false), true)}
         </div>
+      ) : matrixView && workspaceView === "screen" && matrixView.kind === "cytof" ? (
+        <div
+          ref={commonPathRef}
+          className="gl-comp-common-path"
+          style={{ gridTemplateColumns: `minmax(440px, 1fr) 8px ${inspectorWidth}px` }}
+        >
+          <CompensationScreenPanel
+            state={screen}
+            channelLabel={(pnn) => channelDisplayForPnn(sample, pnn).label}
+            populationName={activeReviewPopulation?.name ?? null}
+            selected={selectedPairKey
+              ? { source: selectedPairKey.split(PAIR_SEPARATOR)[0], receiver: selectedPairKey.split(PAIR_SEPARATOR)[1] }
+              : null}
+            onSelect={(source, receiver) => {
+              setHoveredPairKey(null);
+              setSelectedPairKey(`${source}${PAIR_SEPARATOR}${receiver}`);
+            }}
+            isStaged={(source, receiver) => stagedCoefficients[`${source}${PAIR_SEPARATOR}${receiver}`] !== undefined}
+            canStage={Boolean(profileRecord) && !applyBusy}
+            onStage={(edits) => {
+              for (const edit of edits) stageCoefficient(`${edit.source}${PAIR_SEPARATOR}${edit.receiver}`, edit.value);
+            }}
+            onRunAgain={() => setScreenRevision((revision) => revision + 1)}
+          />
+          {renderInspectorResizeHandle()}
+          {renderPairInspector()}
+        </div>
       ) : matrixView ? (
         <div
           ref={commonPathRef}
@@ -4126,7 +4294,9 @@ function CompensationTabImpl({
             <div className="gl-comp-attention-head">
               <div>
                 <h3 id="comp-attention-heading">{t("Flagged pairs")}</h3>
-                <p>{t("This is your follow-up queue. Suggestions are a population-scoped evidence screen, not a verdict and not automatically included. Exact sweeps change one coefficient at a time across four user-bounded values using the same frozen events.")}</p>
+                <p>{t(matrixView.kind === "cytof"
+                  ? "This is your follow-up queue. Every pair is read against the events in Check; flag a pair here to run exact sweeps, which change one coefficient at a time across four user-bounded values using the same frozen events."
+                  : "This is your follow-up queue. Suggestions are a population-scoped evidence screen, not a verdict and not automatically included. Exact sweeps change one coefficient at a time across four user-bounded values using the same frozen events.")}</p>
               </div>
               <div className="gl-comp-attention-actions">
                 <label>
@@ -4156,6 +4326,7 @@ function CompensationTabImpl({
                 )}
               </div>
             </div>
+            {matrixView.kind !== "cytof" && (
             <div className="gl-comp-attention-scope">
               <span>
                 {t("Suggestions computed for {population} from up to {count} frozen events.", {
@@ -4210,6 +4381,12 @@ function CompensationTabImpl({
                 {" "}{t("Sweep workers are separate from full-Apply workers.")}
               </small>
             </div>
+            )}
+            {matrixView.kind === "cytof" && (
+              <div className="gl-comp-attention-scope">
+                <small>{t("Sweep workers are separate from full-Apply workers.")}</small>
+              </div>
+            )}
             {sweepProgress && (
               <div className="gl-comp-sweep-progress" role="status" aria-live="polite">
                 <progress max={Math.max(1, sweepProgress.total)} value={sweepProgress.completed} />
@@ -4380,6 +4557,7 @@ function CompensationTabImpl({
                   )}
                   </div>
 
+                  {matrixView.kind !== "cytof" && (
                   <div className="gl-comp-attention-section gl-comp-suggestions">
                   <div className="gl-comp-attention-section-head">
                     <div>
@@ -4432,6 +4610,7 @@ function CompensationTabImpl({
                     </div>
                   )}
                   </div>
+                  )}
                 </div>
               </>
             )}
@@ -4538,7 +4717,7 @@ function CompensationTabImpl({
                   <p>{t("No matrix-level items currently require review.")}</p>
                 )}
               </div>
-              {installedStatus.state === "ready" && matrixView && (
+              {installedStatus.state === "ready" && matrixView && matrixView.kind !== "cytof" && (
                 <div className="gl-comp-review-section">
                   <h4>{t("Residual-evidence shortlist")}</h4>
                   <p>{t("Relative ranking of {screened}{candidateSuffix} non-zero or physically plausible pairs. It combines receiver-negative population shift, robust residual slope, upper-tail departure{zeroSuffix}.{modeNote} A high rank is a prompt to inspect, not proof that a coefficient is wrong.", {
@@ -4546,7 +4725,7 @@ function CompensationTabImpl({
                     candidateSuffix: residualEvidenceReview.candidateCount > residualEvidenceReview.screenedCount
                       ? t(" of {count}", { count: residualEvidenceReview.candidateCount.toLocaleString() })
                       : "",
-                    zeroSuffix: matrixView.kind === "cytof" ? t(", and new exact-zero pile") : "",
+                    zeroSuffix: "",
                     modeNote: t(evidenceMode === "biological"
                       ? " Broad positive association is excluded because biological co-expression and cell size can mimic spill."
                       : " Positive residual association is enabled because control-data mode is active."),

@@ -108,6 +108,9 @@ function fixture(chart: FigureChart = { valueKind: "cells", plotType: "violin", 
 
 const openSection = (name: string) =>
   act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === name)!.click());
+/** Show one plot by its tab over the preview: the preview and the Plots section then hold that plot alone. */
+const showPlot = (name: string) =>
+  act(() => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="Plots"] [role="tab"]')].find((b) => b.textContent === name)!.click());
 const checkbox = (editor: HTMLElement, text: string) =>
   [...editor.querySelectorAll("label")].find((l) => l.textContent?.trim() === text)?.querySelector<HTMLInputElement>('input[type="checkbox"]') ?? null;
 const labels = (svg: Element) => [...svg.querySelectorAll("text title")].map((t) => t.textContent);
@@ -117,8 +120,11 @@ describe("Illustration: a summary panel of all files", () => {
     const fx = fixture({ valueKind: "cells", plotType: "violin" });
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    openSection("Plots");
-    const editor = () => host.querySelectorAll<HTMLElement>(".gl-figure-plot-editor")[1];
+    openSection("Plot");
+    // The Plots section holds the shown plot's editor alone, so the chart's tab is clicked first.
+    showPlot("FSC violin");
+    await flush();
+    const editor = () => host.querySelectorAll<HTMLElement>(".gl-figure-plot-editor")[0];
     const summary = checkbox(editor(), "One panel for all files")!;
     expect(summary.checked).toBe(false);
     expect(checkbox(editor(), "Show file labels")).toBeNull();
@@ -134,6 +140,8 @@ describe("Illustration: a summary panel of all files", () => {
     await flush();
     expect(fx.props.configRef.current!.figure!.plots[1].chart).toMatchObject({ summary: true, fileLabels: true });
     // The histogram plot has none of it.
+    showPlot("Size");
+    await flush();
     expect(checkbox(host.querySelectorAll<HTMLElement>(".gl-figure-plot-editor")[0], "One panel for all files")).toBeNull();
   });
 
@@ -141,11 +149,18 @@ describe("Illustration: a summary panel of all files", () => {
     const fx = fixture();
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    const rows = [...host.querySelectorAll<HTMLTableRowElement>("#figure-preview-grid tbody tr")];
-    expect(rows).toHaveLength(2);
-    const cells = rows.map((row) => [...row.querySelectorAll<HTMLTableCellElement>("td[data-figure-panel]")]);
-    expect(cells.map((row) => row.length)).toEqual([3, 1]);
-    const summary = cells[1][0];
+    // One plot is shown at a time: the histogram's row has a panel per file, and the summary's
+    // row, under its own tab, one panel across the same three columns.
+    const rowsShown = () => [...host.querySelectorAll<HTMLTableRowElement>("#figure-preview-grid tbody tr")];
+    const cellsOf = (row: HTMLTableRowElement) => [...row.querySelectorAll<HTMLTableCellElement>("td[data-figure-panel]")];
+    expect(rowsShown().map((row) => cellsOf(row).length)).toEqual([3]);
+    showPlot("FSC violin");
+    await flush();
+    const rows = rowsShown();
+    expect(rows).toHaveLength(1);
+    const cells = rows.map(cellsOf);
+    expect(cells.map((row) => row.length)).toEqual([1]);
+    const summary = cells[0][0];
     expect(summary.colSpan).toBe(3);
     const charts = host.querySelectorAll<HTMLElement>(".gl-figure-chart");
     expect(charts).toHaveLength(1);
@@ -161,13 +176,15 @@ describe("Illustration: a summary panel of all files", () => {
     // Three violins, one per file, each from its file's four events.
     expect(chart.getAttribute("aria-label")).toBe("FSC violin; 12 cells");
     // The value axis has room left of the first column, in the row headings.
-    const heading = rows[1].querySelectorAll<HTMLElement>("th")[rows[1].querySelectorAll("th").length - 1];
+    const heading = rows[0].querySelectorAll<HTMLElement>("th")[rows[0].querySelectorAll("th").length - 1];
     expect(parseFloat(heading.style.paddingRight)).toBe(Math.ceil(hang) - 12);
   });
 
   it("names the files under the marks when asked, and the metadata values when the files are grouped by one", async () => {
     const fx = fixture({ valueKind: "cells", plotType: "box", summary: true, fileLabels: true });
     act(() => root.render(<IllustrationTab {...fx.props} />));
+    await flush();
+    showPlot("FSC violin");
     await flush();
     expect(labels(host.querySelector(".gl-figure-chart svg.gl-prop-panel")!)).toEqual(["D1.fcs", "D2.fcs", "D3.fcs"]);
     act(() => root.unmount());
@@ -178,7 +195,10 @@ describe("Illustration: a summary panel of all files", () => {
     figure.plots[1].chart = { valueKind: "statistic", plotType: "box", summary: true, fileLabels: true };
     act(() => root.render(<IllustrationTab {...fx.props} />));
     await flush();
-    const summary = host.querySelector<HTMLTableCellElement>("#figure-preview-grid tbody tr:nth-child(2) td[data-figure-panel]")!;
+    showPlot("FSC violin");
+    await flush();
+    // The summary's row is the only one shown, its plot alone in the preview.
+    const summary = host.querySelector<HTMLTableCellElement>("#figure-preview-grid tbody tr td[data-figure-panel]")!;
     expect(summary.colSpan).toBe(2);
     // The value axis's title, then a box of each group's files.
     expect(labels(summary.querySelector("svg.gl-prop-panel")!)).toEqual(["Median FSC-A", "control", "treated"]);
@@ -187,6 +207,9 @@ describe("Illustration: a summary panel of all files", () => {
   it("is exported as one vector chart over the span", async () => {
     const fx = fixture();
     act(() => root.render(<IllustrationTab {...fx.props} />));
+    await flush();
+    // Export draws the plot shown.
+    showPlot("FSC violin");
     await flush();
     const file = gridSvgFile("figure-preview-grid")!;
     expect(file.xml.match(/class="gl-prop-panel"/g)).toHaveLength(1);
@@ -201,12 +224,19 @@ describe("Illustration: a summary panel of all files", () => {
     act(() => root.render(<IllustrationTab {...fx.props} onAddToLayout={onAddToLayout} />));
     await flush();
     openSection("Export");
-    act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add panels to Layout")!.click());
-    const [recipes, cells, , panelSize] = onAddToLayout.mock.calls[0];
+    const addPanels = () => act(() => [...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Add panels to Layout")!.click());
+    // "Add panels to Layout" takes the shown plot's panels: the histogram's three from its tab,
+    // then the summary alone from its own, spanning the three files' columns.
+    addPanels();
+    expect(onAddToLayout.mock.calls[0][0].map((recipe: { kind: string }) => recipe.kind)).toEqual(["histogram", "histogram", "histogram"]);
+    showPlot("FSC violin");
+    await flush();
+    addPanels();
+    const [recipes, cells, , panelSize] = onAddToLayout.mock.calls[1];
     expect(panelSize).toBe(SIZE);
-    expect(recipes.map((recipe: { kind: string }) => recipe.kind)).toEqual(["histogram", "histogram", "histogram", "proportions"]);
-    expect(cells[3]).toEqual({ row: 1, column: 0, span: { rows: 1, columns: 3 } });
-    const block = recipes[3];
+    expect(recipes.map((recipe: { kind: string }) => recipe.kind)).toEqual(["proportions"]);
+    expect(cells[0]).toEqual({ row: 0, column: 0, span: { rows: 1, columns: 3 } });
+    const block = recipes[0];
     expect(block.textSize).toBe("sheet");
     expect(block.panel).toEqual({});
     expect(block.settings).toMatchObject({

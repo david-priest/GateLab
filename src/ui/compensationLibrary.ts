@@ -21,6 +21,7 @@ import { parseCompensationMatrixTable } from "../engine/compensationMatrixImport
 import {
   createCompensationBaselineProfile,
   type BaselineCompensationProfileRecord,
+  type CalculatedMatrixControl,
   type CompensationProfileRecord,
 } from "../engine/compensationProfileRecord";
 import { DEFAULT_FLOW_SOLVER_SETTINGS, FLOW_SOLVER_VERSION } from "../engine/flowCompensationEngine";
@@ -109,6 +110,8 @@ export type MatrixSource =
   | Readonly<{ type: "imported"; fileName: string }>
   | Readonly<{ type: "edited"; from: string }>
   | Readonly<{ type: "empty" }>
+  /** Calculated in GateLab from single-stained controls: how many rows came from a control. */
+  | Readonly<{ type: "calculated"; controls: number }>
   | Readonly<{ type: "preset"; presetId: string }>;
 
 export interface MatrixLibraryRow {
@@ -146,6 +149,21 @@ export interface MatrixLibraryRow {
   readonly number: number | null;
   /** The matrix in use when the data came in (MatrixNumbers.primary). */
   readonly primary: boolean;
+  /**
+   * A lineage's stored records, the baseline first and then each revision in the order it was made,
+   * each as a row of its own (empty for an embedded matrix). An earlier version is used again by
+   * using its row.
+   */
+  readonly versions: readonly MatrixVersionRow[];
+}
+
+/** One record of a lineage as a row: the row's fields describe that record. */
+export interface MatrixVersionRow extends MatrixLibraryRow {
+  /** 1 for the baseline, then 2, 3, … in the order the revisions were made. */
+  readonly version: number;
+  /** The version this one was edited from; null for the baseline. */
+  readonly parentVersion: number | null;
+  readonly revisionReason: "edit" | "reset-to-baseline" | null;
 }
 
 /**
@@ -278,6 +296,9 @@ function sourceOf(
   if (origin.type === "embedded-fcs") return { type: "embedded", fileName: origin.fileName };
   if (origin.type === "uploaded") return { type: "imported", fileName: origin.fileName };
   if (origin.type === "manual") return { type: "empty" };
+  if (origin.type === "calculated") {
+    return { type: "calculated", controls: origin.controls.filter((control) => control.row === "control").length };
+  }
   return { type: "preset", presetId: origin.presetId };
 }
 
@@ -343,8 +364,54 @@ export function buildMatrixLibrary(
     // The stored form of a file's matrix stands in for its row, so it shows that matrix's number;
     // once edited it is another matrix, and the file's row returns with the number.
     const standsFor = embeddedStoredAs.get(`${record.matrixHash}\n${baseline.name}`);
+    const number = numbered(standsFor !== undefined ? `embedded:${standsFor}` : `lineage:${lineage.baselineProfileId}`);
+    // The baseline first, then the revisions by the time they were made (the stored order on a tie).
+    const ordered = [
+      baseline,
+      ...lineage.records
+        .map((candidate, index) => ({ candidate, index }))
+        .filter(({ candidate }) => candidate !== baseline)
+        .sort((left, right) =>
+          left.candidate.createdAt < right.candidate.createdAt ? -1
+            : left.candidate.createdAt > right.candidate.createdAt ? 1
+              : left.index - right.index)
+        .map(({ candidate }) => candidate),
+    ];
+    const versionOf = new Map(ordered.map(({ profileId }, index) => [profileId, index + 1]));
+    const parents = new Set(ordered.map(({ parentProfileId }) => parentProfileId).filter((id) => id !== null));
+    const versions: MatrixVersionRow[] = ordered.map((version, index) => {
+      const versionActive = version.profileId === activeId;
+      const versionUses = profileUses.get(version.profileId) ?? 0;
+      return {
+        ...number,
+        id: `lineage:${lineage.baselineProfileId}#${version.profileId}`,
+        kind: "lineage",
+        // The matrix's own name, whichever version is in use (a revision's record is named "… · edited").
+        name: lineage.name ?? baseline.name,
+        named: lineage.name !== undefined,
+        source: sourceOf(version, baseline, lineage.name ?? baseline.name),
+        compensationKind: version.scientific.kind,
+        channelCount: channelCountOf(version),
+        matrix: version.scientific.matrix,
+        exportMatrix: version.scientific.matrix,
+        matrixHash: version.matrixHash,
+        unusable: null,
+        profile: version,
+        baselineProfileId: lineage.baselineProfileId,
+        embedded: null,
+        filesUsing: versionUses,
+        active: versionActive,
+        canRename: false,
+        // A revision no file uses and no other version was edited from: the lineage stays whole.
+        canDelete: version.recordType === "revision" && !versionActive && versionUses === 0 && !parents.has(version.profileId),
+        versions: [],
+        version: index + 1,
+        parentVersion: version.parentProfileId === null ? null : versionOf.get(version.parentProfileId) ?? null,
+        revisionReason: version.revisionReason,
+      };
+    });
     rows.push({
-      ...numbered(standsFor !== undefined ? `embedded:${standsFor}` : `lineage:${lineage.baselineProfileId}`),
+      ...number,
       id: `lineage:${lineage.baselineProfileId}`,
       kind: "lineage",
       name,
@@ -365,6 +432,7 @@ export function buildMatrixLibrary(
       // Neither the active matrix nor one a file is compensated with. A file's own matrix is
       // never lost by deleting a stored copy of it: its embedded row is listed again.
       canDelete: !active && !lineageInUse,
+      versions,
     });
   }
 
@@ -402,6 +470,7 @@ export function buildMatrixLibrary(
         active: !activeIsStored && filesUsing > 0,
         canRename: false,
         canDelete: false,
+        versions: [],
       });
     }
   }
@@ -470,6 +539,8 @@ export function planMatrixSwitch(
   gates: Readonly<Record<string, Gate>>,
   populations: PopulationMap,
   rootPopulationId: string | null,
+  /** A CyTOF matrix's channels in the NNLS solve; every receiver where not given. */
+  includedChannels?: readonly string[],
 ): MatrixSwitchPlan {
   const uncovered: MatrixSwitchUncovered[] = [];
   const leavingEmbedded: string[] = [];
@@ -481,7 +552,7 @@ export function planMatrixSwitch(
     }
     const report = kind === "flow-spillover"
       ? reportMatrixCompatibility({ kind, matrix, sampleChannels: sample.channels })
-      : reportMatrixCompatibility({ kind, matrix, sampleChannels: sample.channels, includedChannels: matrix.receiverChannels });
+      : reportMatrixCompatibility({ kind, matrix, sampleChannels: sample.channels, includedChannels: includedChannels ?? matrix.receiverChannels });
     if (!report.canApply) {
       uncovered.push({
         name,
@@ -678,4 +749,44 @@ export async function importedFlowMatrix(
     },
   );
   return { profile, unmatched, roundedCoefficients };
+}
+
+/** The estimator "Calculate from controls…" uses, as a calculated matrix's origin names it. */
+export const MEDIAN_ESTIMATOR = { estimator: "median-difference", estimatorVersion: "1" } as const;
+
+/**
+ * A matrix calculated from single-stained controls as a baseline profile, its origin recording the
+ * file, the event counts and the boundaries each row was calculated from. It is added to the list
+ * like an imported matrix: not in use until chosen.
+ */
+export function calculatedFlowMatrix(
+  channels: readonly string[],
+  matrix: readonly (readonly number[])[],
+  controls: readonly CalculatedMatrixControl[],
+  name: string,
+): Promise<BaselineCompensationProfileRecord> {
+  const { validation } = storableFlowMatrix({ sourceChannels: channels, receiverChannels: channels, matrix });
+  if (!validation.ok) {
+    return Promise.reject(new MatrixImportError(validation.errors.map(({ message }) => message).join(" ")));
+  }
+  return createCompensationBaselineProfile(
+    {
+      kind: "flow-spillover",
+      method: "matrix-inverse",
+      solverVersion: FLOW_SOLVER_VERSION,
+      solverSettings: DEFAULT_FLOW_SOLVER_SETTINGS,
+      matrix: validation.value,
+    },
+    {
+      profileId: `flow-calculated-${newProfileSuffix()}`,
+      name,
+      createdAt: new Date(),
+      origin: { type: "calculated", ...MEDIAN_ESTIMATOR, controls },
+      provenance: {
+        sourceDescription: "Spillover matrix calculated from single-stained controls",
+        estimationMethod:
+          "Per receiver, the median of the positive events minus the median of the negative events, over the same difference in the control's own channel; estimates below zero stored as 0",
+      },
+    },
+  );
 }

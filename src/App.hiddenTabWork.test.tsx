@@ -168,14 +168,14 @@ describe("hidden tabs and gating-only updates", () => {
     // Three charts on the Plotting tab, then back to Gating.
     act(() => buttonWithText("Plotting")!.click());
     await settle();
-    act(() => buttonWithText("New chart")!.click());
-    act(() => buttonWithText("Duplicate")!.click());
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="New chart"]')!.click());
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="New chart"]')!.click());
     await settle();
-    const names = () => [...host.querySelectorAll<HTMLSelectElement>('select[aria-label="Chart"] option')].map((option) => option.textContent);
-    expect(names()).toEqual(["Chart 1", "Chart 2", "Chart 2 copy"]);
+    const names = () => [...host.querySelectorAll<HTMLButtonElement>('[aria-label="Charts"] [role="tab"]')].map((tab) => tab.textContent);
+    expect(names()).toEqual(["Chart 1", "Chart 2", "Chart 3"]);
     act(() => buttonWithText("Gating")!.click());
     await settle();
-    expect(host.querySelector(".gl-plotting-charts")).toBeNull();
+    expect(host.querySelector('[aria-label="Charts"]')).toBeNull();
 
     gateCountCalls.count = 0;
     act(() => plotHarness.props!.onNewGate({
@@ -195,6 +195,6 @@ describe("hidden tabs and gating-only updates", () => {
     // The charts are as they were left.
     act(() => buttonWithText("Plotting")!.click());
     await settle();
-    expect(names()).toEqual(["Chart 1", "Chart 2", "Chart 2 copy"]);
+    expect(names()).toEqual(["Chart 1", "Chart 2", "Chart 3"]);
   });
 });

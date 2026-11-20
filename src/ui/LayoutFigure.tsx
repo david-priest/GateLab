@@ -20,6 +20,7 @@ import type { CoreState } from "../store";
 import { FigureGrid, colourFigureSummaries } from "./FigureGrid";
 import { headOverlaidPopulations } from "./overlayHeading";
 import { useFigurePanels } from "./useFigurePanels";
+import { inlineZoom, settleNaturalSize, type NaturalSize } from "./layout/naturalSize";
 
 /** The block's config with every field the grid reads present, and its figure migrated to the files at hand. */
 export function figureOfBlock(
@@ -128,16 +129,18 @@ export function LayoutFigureSurface({
   // The grid is laid out at its natural size and zoomed to fit the frame, never enlarged.
   const gridRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
+  const naturalRef = useRef<NaturalSize | null>(null);
   useLayoutEffect(() => {
     const node = gridRef.current;
     if (!node) return;
     const measure = () => {
       const natural = node.firstElementChild as HTMLElement | null;
       if (!natural) return;
-      const w = natural.offsetWidth;
-      const h = natural.offsetHeight;
-      if (!w || !h) return;
-      setZoom(Math.min(1, width / w, height / h));
+      if (!natural.offsetWidth || !natural.offsetHeight) return;
+      // Not taken when only the zoom's rounding moved it, or the block flickers (naturalSize.ts).
+      const size = settleNaturalSize(naturalRef.current, { width: natural.offsetWidth, height: natural.offsetHeight, zoom: inlineZoom(node) });
+      naturalRef.current = size;
+      setZoom(Math.min(1, width / size.width, height / size.height));
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;

@@ -8,6 +8,23 @@ export interface StreamZipEntry {
   readonly bytes: Uint8Array;
 }
 
+/**
+ * An entry whose bytes are read only when the writer reaches it, so a bundle can carry payloads
+ * (stored compensated assays) that are not held in memory together. `read` must resolve to
+ * exactly `byteLength` bytes.
+ */
+export interface LazyStreamZipEntry {
+  readonly path: string;
+  readonly byteLength: number;
+  readonly read: () => Promise<Uint8Array>;
+}
+
+export type AnyStreamZipEntry = StreamZipEntry | LazyStreamZipEntry;
+
+export function streamZipEntryByteLength(entry: AnyStreamZipEntry): number {
+  return "bytes" in entry ? entry.bytes.byteLength : entry.byteLength;
+}
+
 export interface StreamZipWriteProgress {
   readonly writtenPayloadBytes: number;
   readonly totalPayloadBytes: number;
@@ -44,7 +61,7 @@ function positiveSafeInteger(value: number, label: string): number {
  * second whole-archive buffer is more valuable than a small size reduction for multi-GB files.
  */
 export async function writeStoredZip(
-  entries: readonly StreamZipEntry[],
+  entries: readonly AnyStreamZipEntry[],
   sink: ZipChunkSink,
   options: StreamZipWriteOptions = {},
 ): Promise<void> {
@@ -58,9 +75,13 @@ export async function writeStoredZip(
     if (!entry || !safeArchivePath(entry.path) || seenPaths.has(entry.path)) {
       throw new Error(`Unsafe or duplicate ZIP entry '${entry?.path ?? ""}'.`);
     }
-    if (!(entry.bytes instanceof Uint8Array)) throw new Error(`ZIP entry '${entry.path}' has no byte payload.`);
+    if ("bytes" in entry
+      ? !(entry.bytes instanceof Uint8Array)
+      : typeof entry.read !== "function" || !Number.isSafeInteger(entry.byteLength) || entry.byteLength < 0) {
+      throw new Error(`ZIP entry '${entry.path}' has no byte payload.`);
+    }
     seenPaths.add(entry.path);
-    totalPayloadBytes += entry.bytes.byteLength;
+    totalPayloadBytes += streamZipEntryByteLength(entry);
     if (!Number.isSafeInteger(totalPayloadBytes)) throw new Error("Workspace ZIP payload is too large.");
   }
 
@@ -87,14 +108,19 @@ export async function writeStoredZip(
   try {
     for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
       const entry = entries[entryIndex];
+      // A lazy entry is read here, written, and let go before the next one is read.
+      const bytes = "bytes" in entry ? entry.bytes : await entry.read();
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength !== streamZipEntryByteLength(entry)) {
+        throw new Error(`ZIP entry '${entry.path}' did not supply its declared ${streamZipEntryByteLength(entry)} bytes.`);
+      }
       const file = new ZipPassThrough(entry.path);
       zip.add(file);
-      if (entry.bytes.byteLength === 0) {
+      if (bytes.byteLength === 0) {
         file.push(new Uint8Array(0), true);
       } else {
-        for (let start = 0; start < entry.bytes.byteLength; start += chunkBytes) {
-          const end = Math.min(entry.bytes.byteLength, start + chunkBytes);
-          file.push(entry.bytes.subarray(start, end), end === entry.bytes.byteLength);
+        for (let start = 0; start < bytes.byteLength; start += chunkBytes) {
+          const end = Math.min(bytes.byteLength, start + chunkBytes);
+          file.push(bytes.subarray(start, end), end === bytes.byteLength);
           writtenPayloadBytes += end - start;
           await outputChain;
           options.onProgress?.(Object.freeze({
@@ -190,6 +216,65 @@ async function readZipDirectory(file: File): Promise<{ entries: ZipDirectoryEntr
   if (at !== directory.length) return null;
   entries.sort((a, b) => a.localOffset - b.localOffset);
   return { entries, offset };
+}
+
+/** Where one entry's data lie in an archive File, for reading that entry alone later. */
+export interface LocatedZipEntry {
+  readonly path: string;
+  readonly method: number;
+  readonly dataStart: number;
+  readonly compressedSize: number;
+  readonly size: number;
+}
+
+/**
+ * The data extents of the selected entries, read from the archive's central directory and each
+ * entry's local header, without reading any entry's data. Null where the directory cannot be
+ * relied on (readZipDirectory).
+ */
+export async function locateZipFileEntries(
+  file: File,
+  select: (path: string) => boolean,
+): Promise<ReadonlyMap<string, LocatedZipEntry> | null> {
+  const directory = await readZipDirectory(file);
+  if (!directory) return null;
+  const located = new Map<string, LocatedZipEntry>();
+  for (const entry of directory.entries) {
+    if (!select(entry.path)) continue;
+    if (!safeArchivePath(entry.path) || located.has(entry.path)) {
+      throw new Error(`Unsafe or duplicate ZIP entry '${entry.path}'.`);
+    }
+    if (entry.method !== 0 && entry.method !== 8) {
+      throw new Error(`ZIP entry '${entry.path}' uses a compression method GateLab does not read.`);
+    }
+    const local = await sliceBytes(file, entry.localOffset, entry.localOffset + 30);
+    if (local.length < 30 || u32(local, 0) !== 0x04034b50) {
+      throw new Error(`ZIP entry '${entry.path}' has no local header where the archive's directory places it.`);
+    }
+    const dataStart = entry.localOffset + 30 + u16(local, 26) + u16(local, 28);
+    if (dataStart + entry.compressedSize > directory.offset) {
+      throw new Error(`ZIP entry '${entry.path}' runs past the archive's directory.`);
+    }
+    located.set(entry.path, Object.freeze({
+      path: entry.path,
+      method: entry.method,
+      dataStart,
+      compressedSize: entry.compressedSize,
+      size: entry.size,
+    }));
+  }
+  return located;
+}
+
+/** One located entry's bytes, read from the File on demand. */
+export async function readLocatedZipEntry(file: File, entry: LocatedZipEntry): Promise<Uint8Array> {
+  const stored = await sliceBytes(file, entry.dataStart, entry.dataStart + entry.compressedSize);
+  if (stored.length !== entry.compressedSize) throw new Error(`ZIP entry '${entry.path}' is cut short.`);
+  const bytes = entry.method === 0 ? stored : inflateSync(stored, { out: new Uint8Array(entry.size) });
+  if (bytes.length !== entry.size) {
+    throw new Error(`ZIP entry '${entry.path}' does not match its declared byte length.`);
+  }
+  return bytes;
 }
 
 /**

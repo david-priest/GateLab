@@ -1,6 +1,7 @@
-// PlottingCharts.tsx — the Plotting tab's named charts: a picker with New chart, Duplicate, Rename
-// and Delete at the top of the side panel, and Undo and Redo, as the Illustration tab has beside
-// its figure's name. The charts and their history are held in tabState.ts, so they outlive the
+// PlottingCharts.tsx — the Plotting tab's named charts: a tab each across the top, as the Layout
+// tab shows its sheets (SheetTabs.tsx: click to show, double-click to rename, drag to reorder,
+// right-click to move, rename, duplicate or delete, + for a new chart), with Undo and Redo at the
+// strip's right end. The charts and their history are held in tabState.ts, so they outlive the
 // tab's unmounting and are saved with the workspace; the tab itself is remounted to show another
 // chart or an undone state, since it reads its settings when it mounts.
 
@@ -9,6 +10,7 @@ import type { WorkspacePlottingCharts } from "../engine/workspace";
 import { historyShortcutAction } from "./historyShortcuts";
 import { useI18n } from "./i18n";
 import { PlottingTab } from "./PlottingTab";
+import { movedSheetTabs, SheetTabs } from "./SheetTabs";
 import {
   canRedoPlotting,
   canUndoPlotting,
@@ -22,7 +24,7 @@ import {
   uniquePlottingChartName,
 } from "./tabState";
 
-type Props = Omit<ComponentProps<typeof PlottingTab>, "chartBar">;
+type Props = ComponentProps<typeof PlottingTab>;
 
 /** The fields of the shown chart whose values differ between two lists of the same charts; null when the charts themselves differ. */
 function changedFields(before: WorkspacePlottingCharts, after: WorkspacePlottingCharts): string[] | null {
@@ -47,8 +49,6 @@ export function PlottingChartsTab(props: Props) {
   const [epoch, setEpoch] = useState(0);
   const [, setListVersion] = useState(0);
   const [history, setHistory] = useState(() => ({ undo: canUndoPlotting(), redo: canRedoPlotting() }));
-  const [renaming, setRenaming] = useState(false);
-  const renameCancelled = useRef(false);
   const list = plottingCharts();
   const active = list.charts.find((chart) => chart.id === list.activeId) ?? list.charts[0];
 
@@ -126,29 +126,44 @@ export function PlottingChartsTab(props: Props) {
     changePlottingCharts({ activeId: chart.id, charts: [...list.charts, chart] });
     shown(true);
   };
-  const duplicate = () => {
-    const chart = { id: crypto.randomUUID(), name: uniquePlottingChartName(list, `${active.name} copy`), plotting: structuredClone(active.plotting) };
-    const at = list.charts.findIndex(({ id }) => id === active.id) + 1;
+  const duplicate = (id: string) => {
+    const source = list.charts.find((chart) => chart.id === id);
+    if (!source) return;
+    const chart = { id: crypto.randomUUID(), name: uniquePlottingChartName(list, `${source.name} copy`), plotting: structuredClone(source.plotting) };
+    const at = list.charts.findIndex((each) => each.id === id) + 1;
     changePlottingCharts({ activeId: chart.id, charts: [...list.charts.slice(0, at), chart, ...list.charts.slice(at)] });
     shown(true);
   };
-  const rename = (name: string) => {
-    setRenaming(false);
-    const trimmed = name.trim();
-    if (!trimmed || trimmed === active.name) return;
-    changePlottingCharts({ ...list, charts: list.charts.map((chart) => (chart.id === active.id ? { ...chart, name: trimmed } : chart)) });
-    // The shown chart's settings are unchanged: the tab is not remounted.
+  /** A change to the list that leaves the shown chart's settings as they are: the tab is not remounted. */
+  const listChanged = (next: typeof list) => {
+    changePlottingCharts(next);
     baseline.current = plottingCharts();
     lastStep.current = null;
     setListVersion((value) => value + 1);
     syncHistory();
     onConfigChange?.();
   };
-  const remove = () => {
+  const rename = (id: string, name: string) => {
+    const trimmed = name.trim();
+    if (!trimmed || list.charts.some((chart) => chart.id === id && chart.name === trimmed)) return;
+    listChanged({ ...list, charts: list.charts.map((chart) => (chart.id === id ? { ...chart, name: trimmed } : chart)) });
+  };
+  const move = (id: string, to: number) => {
+    const charts = movedSheetTabs(list.charts, id, to);
+    if (charts.every((chart, i) => chart.id === list.charts[i].id)) return;
+    listChanged({ ...list, charts });
+  };
+  const remove = (id: string) => {
     if (list.charts.length < 2) return;
-    const index = list.charts.findIndex(({ id }) => id === active.id);
-    const charts = list.charts.filter(({ id }) => id !== active.id);
-    changePlottingCharts({ activeId: charts[Math.min(index, charts.length - 1)].id, charts });
+    const index = list.charts.findIndex((chart) => chart.id === id);
+    if (index < 0) return;
+    const charts = list.charts.filter((chart) => chart.id !== id);
+    // Another chart deleted: the shown one stays. The shown one deleted: the one before it is shown.
+    if (id !== list.activeId) {
+      listChanged({ ...list, charts });
+      return;
+    }
+    changePlottingCharts({ activeId: charts[Math.max(0, index - 1)].id, charts });
     shown(true);
   };
   const select = (id: string) => {
@@ -156,75 +171,28 @@ export function PlottingChartsTab(props: Props) {
     shown(false);
   };
 
-  const chartBar = (
-    <section className="gl-plotting-charts" aria-label={t("Charts")}>
-      <div className="gl-plotting-actions">
-        {renaming ? (
-          <input
-            className="gl-plotting-chart-name"
-            aria-label={t("Chart name")}
-            defaultValue={active.name}
-            autoFocus
-            onFocus={(event) => event.currentTarget.select()}
-            onBlur={(event) => {
-              if (renameCancelled.current) {
-                renameCancelled.current = false;
-                setRenaming(false);
-                return;
-              }
-              rename(event.currentTarget.value);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") event.currentTarget.blur();
-              if (event.key === "Escape") {
-                renameCancelled.current = true;
-                event.currentTarget.blur();
-              }
-            }}
-          />
-        ) : (
-          <select
-            aria-label={t("Chart")}
-            title={t("The charts in this workspace, each with its own settings")}
-            value={active.id}
-            onChange={(event) => select(event.target.value)}
-          >
-            {list.charts.map((chart) => (
-              <option key={chart.id} value={chart.id}>{chart.name}</option>
-            ))}
-          </select>
-        )}
-      </div>
-      <div className="gl-plotting-actions">
-        <button type="button" className="gl-mini-btn" title={t("A new chart with the default settings")} onClick={newChart}>
-          {t("New chart")}
-        </button>
-        <button type="button" className="gl-mini-btn" title={t("A copy of this chart as a new chart")} onClick={duplicate}>
-          {t("Duplicate")}
-        </button>
-        <button type="button" className="gl-mini-btn" disabled={renaming} title={t("Rename this chart")} onClick={() => setRenaming(true)}>
-          {t("Rename")}
-        </button>
-        <button
-          type="button"
-          className="gl-mini-btn"
-          disabled={list.charts.length < 2}
-          title={list.charts.length < 2 ? t("The last chart cannot be deleted") : t("Delete this chart")}
-          onClick={remove}
-        >
-          {t("Delete")}
-        </button>
-      </div>
-      <div className="gl-plotting-actions">
+  return (
+    <div className="gl-tab-panel gl-tab-fill gl-sheet-tabbed">
+      <SheetTabs
+        items={list.charts}
+        activeId={active.id}
+        label={t("Charts")}
+        addTitle={t("New chart")}
+        onSelect={select}
+        onRename={rename}
+        onMove={move}
+        onAdd={newChart}
+        onDuplicate={duplicate}
+        onDelete={remove}
+      >
         <button type="button" className="gl-mini-btn" disabled={!history.undo} title={t("Undo the last Plotting change (Cmd-Z)")} onClick={undo}>
           {t("Undo")}
         </button>
         <button type="button" className="gl-mini-btn" disabled={!history.redo} title={t("Redo the undone edit (Shift-Cmd-Z)")} onClick={redo}>
           {t("Redo")}
         </button>
-      </div>
-    </section>
+      </SheetTabs>
+      <PlottingTab {...props} key={`${list.activeId}:${epoch}`} onConfigChange={onSettingsChange} />
+    </div>
   );
-
-  return <PlottingTab {...props} key={`${list.activeId}:${epoch}`} onConfigChange={onSettingsChange} chartBar={chartBar} />;
 }

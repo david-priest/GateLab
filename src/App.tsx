@@ -2,7 +2,7 @@
 // GateLabR) with live counts. Drawing a gate opens the name/population modal; the plot
 // shows the active population's events plus its gates (display space).
 
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from "react";
+import { lazy, Suspense, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type SetStateAction } from "react";
 import { usePopoverDismissal } from "./ui/usePopoverDismissal";
 import { BiexAxisControl } from "./ui/BiexAxisControl";
 import { FoldSummary } from "./ui/FoldSummary";
@@ -25,6 +25,10 @@ import { historyShortcutAction, isDeleteShortcut } from "./ui/historyShortcuts";
 import { ModalEscape } from "./ui/useModalEscape";
 import { ActionNote } from "./ui/ActionNote";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
+import { buildCompanionPlot, type CompanionPlot, type CompanionPlotInput, type CompanionPlotView, type CompanionPoolFile } from "./plots/companionPlotPayload";
+import { GatingCompanionPlot } from "./ui/GatingCompanionPlot";
+import { GatingPlotResizeHandle } from "./ui/GatingPlotResizeHandle";
+import { MAX_GATING_PLOTS, ONE_GATING_PLOT, addGatingPlot, plotGridShape, removeGatingPlot, selectGatingPlot, type GatingPlots } from "./ui/gatingPlotViews";
 import { startPanSession, zoomAnchored } from "./plots/panGesture";
 import { buildPlotGates, keepOpenSides, plotGatesInPlotOrientation, type PlotGate } from "./plots/gatePayload";
 import { HistogramPlot, type RangeEdit } from "./plots/HistogramPlot";
@@ -215,11 +219,24 @@ import {
 import { reportMatrixCompatibility } from "./engine/compensationCompatibility";
 import type { CompensationProfileRecord } from "./engine/compensationProfileRecord";
 import {
+  compensatedBindingSignature,
   digestFcsBytes,
   installCachedCompensatedAssay,
   readCachedCompensatedAssay,
   writeCachedCompensatedAssay,
 } from "./engine/compensationCache";
+import { readZipFileEntries } from "./engine/workspaceArchiveStream";
+import { fitsInZip, storedZipBytes } from "./engine/flowjoExportFolder";
+import {
+  locateStoredAssays,
+  STORED_ASSAY_MANIFEST_PATH,
+  type StoredAssayLayerSource,
+} from "./engine/workspaceStoredAssays";
+import {
+  openStoredColumnDisk,
+  StoredAssayStore,
+  storedLayerKey,
+} from "./compensationStore/storedAssayStore";
 import { restorePortableAssayLayers } from "./engine/workspacePortableAssays";
 import {
   supportsFileSystemAccess,
@@ -359,7 +376,7 @@ import {
 import { FigureStyleProvider, figureLayoutFields, newFigureLayoutWorkspace } from "./ui/figureStyle";
 import { DEFAULT_FIGURE_STYLE, isDefaultFigureStyle, normalizeFigureStyle, type FigureStyle } from "./engine/figureStyle";
 import { effectiveLayoutStyle, normalizeLayoutWorkspace, type LayoutGridCell, type LayoutPlotRecipe, type LayoutPlotStyle, type LayoutStrategyRecipe, type LayoutWorkspace, cloneLayoutWorkspace, type LayoutGridHeadings, type LayoutProportionsRecipe, type LayoutProportionsPanel } from "./engine/layout";
-import { ArrowLeftIcon, ArrowRightIcon, RedoIcon, RefreshIcon, ResetIcon, UndoIcon } from "./ui/icons";
+import { AddPlotIcon, ArrowLeftIcon, ArrowRightIcon, RedoIcon, RefreshIcon, ResetIcon, UndoIcon } from "./ui/icons";
 import { workspaceShortcutAction, type WorkspaceShortcutAction } from "./ui/historyShortcuts";
 import { DensityColourControl } from "./ui/DensityColourControl";
 import { MarkerColourBar, type MarkerColourBarTick } from "./ui/MarkerColourBar";
@@ -1073,8 +1090,9 @@ const TABS: { id: TabId; label: string }[] = [
   { id: "images", label: "Images" },
   { id: "strategy", label: "Strategy" },
   { id: "illustration", label: "Illustration" },
-  { id: "layout", label: "Layout" },
+  // Plotting before Layout: the figures and charts are made, then laid out.
   { id: "proportions", label: "Plotting" },
+  { id: "layout", label: "Layout" },
   { id: "division", label: "Division" },
   { id: "statistics", label: "Statistics" },
   { id: "metadata", label: "Metadata" },
@@ -1539,6 +1557,28 @@ export default function App({ hostProposals = null }: {
     () => initialCompensationWorkerCount(compensationWorkerLimit),
   );
   const compensationManagerRef = useRef<CompensationManager | null>(null);
+  // The compensated values of every matrix applied to a file this session, to use again without a
+  // solve and to save in a bundle (storedAssayStore.ts).
+  const storedAssaysRef = useRef<StoredAssayStore>(null as unknown as StoredAssayStore);
+  if (storedAssaysRef.current === null) storedAssaysRef.current = new StoredAssayStore();
+  useEffect(() => {
+    let cancelled = false;
+    void openStoredColumnDisk().then((disk) => {
+      if (!cancelled && disk) storedAssaysRef.current.attachDisk(disk);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const fcsDigestsRef = useRef(new WeakMap<Uint8Array, Promise<Awaited<ReturnType<typeof digestFcsBytes>>>>());
+  /** A file's SHA-256, worked out once per FCS buffer; null for a file with no bytes here (an SCE). */
+  const fcsDigestOf = (entry: SampleEntry): Promise<Awaited<ReturnType<typeof digestFcsBytes>>> | null => {
+    if (!entry.bytes) return null;
+    let pending = fcsDigestsRef.current.get(entry.bytes);
+    if (!pending) {
+      pending = digestFcsBytes(entry.bytes);
+      fcsDigestsRef.current.set(entry.bytes, pending);
+    }
+    return pending;
+  };
   if (compensationManagerRef.current === null) {
     compensationManagerRef.current = new CompensationManager({
       workspaceKey: workspaceId,
@@ -1682,6 +1722,16 @@ export default function App({ hostProposals = null }: {
   const [drawMode, setDrawMode] = useState<DrawMode>("navigate");
   /** The Gating tab shows the X channel alone, as a histogram with its range gates. */
   const [histogramView, setHistogramView] = useState(false);
+  /**
+   * The Gating tab's plots, when it shows more than one (ui/gatingPlotViews.ts). The selected plot
+   * is the one this component has always built from the state above and below; the others are
+   * drawn from the view each keeps. Session state: not saved with the workspace.
+   */
+  const [gatingPlots, setGatingPlots] = useState<GatingPlots>(ONE_GATING_PLOT);
+  /** The Gating tab's plot side set by its corner grip, in px; null fits the plot to its area (session only). */
+  const [gatingPlotSide, setGatingPlotSide] = useState<number | null>(null);
+  const plotGridRef = useRef<HTMLDivElement>(null);
+  const [plotGridBox, setPlotGridBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const [scalesVersion, setScalesVersion] = useState(0);
   // Set when a workspace finishes loading; consumed once the sample, gates and automatic
   // ranges exist, which is later than the load handler itself.
@@ -2434,6 +2484,8 @@ export default function App({ hostProposals = null }: {
   // that shares the channel pair. The wide view is for comparing thresholds set on different
   // branches against each other, which the scoped view deliberately hides.
   const [branchGatesOnly, setBranchGatesOnly] = useState(true);
+  /** With several plots, the plots other than the selected one draw every gate on their channels, not only their branch's (session only). */
+  const [otherPlotsEveryGate, setOtherPlotsEveryGate] = useState(true);
   // The gate list folds away to give the population tree the side panel; remembered per browser.
   const [gatesCollapsed, setGatesCollapsed] = useState(() => {
     try { return localStorage.getItem("gatelab.gatesCollapsed") === "1"; } catch { return false; }
@@ -2774,6 +2826,8 @@ export default function App({ hostProposals = null }: {
     goingBackRef.current = null;
     setViewHistoryLength(0);
     setViewForwardLength(0);
+    // Another workspace opens on one plot: the others' populations and channels were the last one's.
+    setGatingPlots(ONE_GATING_PLOT);
     // Runs on a change of workspace only; the step it starts from is whatever the view is then.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
@@ -7468,6 +7522,26 @@ export default function App({ hostProposals = null }: {
    * Original in one step, the profile's lineage leaves the workspace, and the axes re-fit: the
    * "return to no matrix" the tab offers next to the installed-profile pill.
    */
+  /**
+   * Records with the stored assays the layer each file is compensated with now, and moves to disk
+   * the stored layers no file uses any longer.
+   */
+  async function rememberInstalledLayers(entries: readonly SampleEntry[]): Promise<void> {
+    if (isSceHost) return;
+    const store = storedAssaysRef.current;
+    const installed = new Set<string>();
+    for (const entry of entries) {
+      const status = entry.sample.compensatedLayerStatus();
+      if (status.state !== "ready" || status.metadata.runtimeIdentity !== "profile") continue;
+      const fcsDigest = await fcsDigestOf(entry)?.catch(() => null);
+      if (!fcsDigest) continue;
+      if (store.recordInstalled(fcsDigest, entry.sample, status.metadata)) {
+        installed.add(storedLayerKey(fcsDigest, compensatedBindingSignature(status.metadata)));
+      }
+    }
+    await store.spill(installed);
+  }
+
   async function removeCompensationProfile(): Promise<void> {
     if (!sample) throw new Error(t("No active sample is available for compensation."));
     const manager = compensationManagerRef.current!;
@@ -7479,7 +7553,6 @@ export default function App({ hostProposals = null }: {
     const status = sample.compensatedLayerStatus();
     if (status.state === "missing" || status.metadata.runtimeIdentity !== "profile") return;
     const profileId = status.metadata.profileId;
-    const record = findCompensationProfile(workspaceCompensation, profileId);
     cancelCompensationSweepManagers("The compensation matrix was removed.");
     cancelCompensationCandidatePreview("The compensation matrix was removed.");
     await checkpointCurrentWorkspace("before-compensation-remove");
@@ -7492,20 +7565,18 @@ export default function App({ hostProposals = null }: {
       ) entry.sample.removeCompensatedLayer();
     }
     manager.invalidateProfile(profileId);
-    const baselineId = record?.baselineProfileId ?? profileId;
+    // The matrix and every version of it stay in the Matrices list (David, 2026-11-20: "The used
+    // matrices should be stored"); only the active marker goes, since no file uses it now. Deleting
+    // it is the list's Delete.
     setWorkspaceCompensation((current) => {
-      const lineages = current.lineages.filter(({ baselineProfileId, records }) =>
-        baselineProfileId !== baselineId && !records.some((candidate) => candidate.profileId === profileId));
-      // The active marker goes with its lineage: it never names a profile the workspace lacks.
       const { activeProfileId, ...rest } = current;
-      const keep = activeProfileId !== undefined &&
-        lineages.some(({ records }) => records.some((candidate) => candidate.profileId === activeProfileId));
-      return { ...rest, lineages, ...(keep ? { activeProfileId } : {}) };
+      const keep = activeProfileId !== undefined && activeProfileId !== profileId;
+      return { ...rest, ...(keep ? { activeProfileId } : {}) };
     });
     setXRange(null);
     setYRange(null);
     setError(null);
-    setImportMsg(t("Compensation matrix removed · original assay active"));
+    setImportMsg(t("No file is compensated · original assay active · the matrix stays in the list"));
     markWorkspaceDirty();
   }
 
@@ -7803,14 +7874,78 @@ export default function App({ hostProposals = null }: {
           fraction: 1,
         });
       } else {
-        result = await manager.apply({
-          profile,
-          targets: targetEntries.map(({ sample: targetSample }) => ({
-            sample: targetSample,
-            activeLayer: "compensated",
-          })),
-          onProgress: progressHandler,
-        });
+        // A file whose values for this matrix are stored (it was compensated with it before, or the
+        // bundle carries them) is given those values; only the others are solved.
+        const store = storedAssaysRef.current;
+        const fromStore: {
+          entry: SampleEntry;
+          binding: Awaited<ReturnType<CompensationManager["prepareExternalApplyBinding"]>>["binding"];
+          prepared: ReturnType<Sample["prepareCompensatedLayer"]>;
+        }[] = [];
+        const toSolve: SampleEntry[] = [];
+        let storedProfile: CompensationProfileRecord | null = null;
+        for (const entry of targetEntries) {
+          const fcsDigest = await fcsDigestOf(entry)?.catch(() => null);
+          const external = fcsDigest
+            ? await manager.prepareExternalApplyBinding(profile, entry.sample).catch(() => null)
+            : null;
+          const layer = fcsDigest && external
+            ? store.find(fcsDigest, compensatedBindingSignature(external.binding))
+            : undefined;
+          if (external && layer) {
+            try {
+              const columns = await store.readColumns(layer);
+              fromStore.push({
+                entry,
+                binding: external.binding,
+                prepared: entry.sample.prepareCompensatedLayer(
+                  { metadata: external.binding, columns },
+                  { activeLayer: "compensated" },
+                ),
+              });
+              storedProfile = external.profile;
+              continue;
+            } catch {
+              // Solved instead: the stored values could not be read or no longer fit the file.
+            }
+          }
+          toSolve.push(entry);
+        }
+        const solved = toSolve.length > 0
+          ? await manager.apply({
+              profile,
+              targets: toSolve.map(({ sample: targetSample }) => ({
+                sample: targetSample,
+                activeLayer: "compensated",
+              })),
+              // Named by the file solved, of all the files this Apply covers.
+              onProgress: (progress) => progressHandler({
+                ...progress,
+                sampleIndex: Math.max(0, targetEntries.indexOf(toSolve[progress.sampleIndex])),
+              }),
+            })
+          : null;
+        Sample.commitPreparedCompensatedLayers(fromStore.map(({ prepared }) => prepared));
+        result = {
+          jobId: solved?.jobId ?? `stored:${profile.profileId}`,
+          profile: solved?.profile ?? storedProfile!,
+          targets: [
+            ...(solved?.targets ?? []),
+            ...fromStore.map(({ entry, binding }) => ({ sample: entry.sample, binding })),
+          ],
+        };
+        if (!solved) {
+          progressHandler({
+            jobId: result.jobId,
+            sampleIndex: Math.max(0, targetEntries.length - 1),
+            sampleCount: targetEntries.length,
+            sampleProcessedEvents: targetEntries.at(-1)?.sample.fcs.nEvents ?? 0,
+            sampleTotalEvents: targetEntries.at(-1)?.sample.fcs.nEvents ?? 0,
+            processedEvents: targetTotalEvents,
+            totalEvents: targetTotalEvents,
+            fraction: 1,
+          });
+        }
       }
       // Best-effort local acceleration for every committed target. Cache sequentially so a
       // many-file Apply cannot create a burst of large digest/IndexedDB jobs after completion.
@@ -7831,6 +7966,7 @@ export default function App({ hostProposals = null }: {
         }
       })();
       const appliedProfile = result.profile;
+      void rememberInstalledLayers(samplesRef.current).catch(() => undefined);
       setWorkspaceCompensation((previous) => {
         // The matrix just applied is the workspace's active one (the Matrices list's Active).
         const current = { ...previous, activeProfileId: appliedProfile.profileId };
@@ -9303,6 +9439,7 @@ export default function App({ hostProposals = null }: {
     });
     markWorkspaceDirty();
     setActiveTab("layout");
+    setImportMsg(t("Chart added to {sheet} on the Layout tab.", { sheet: activeLayoutSheetName() }));
   }
 
   /**
@@ -9324,6 +9461,7 @@ export default function App({ hostProposals = null }: {
     });
     markWorkspaceDirty();
     setActiveTab("layout");
+    setImportMsg(t("Chart added to {sheet} on the Layout tab.", { sheet: activeLayoutSheetName() }));
   }
 
   /** A Plotting chart's pages, a new Layout sheet each holding a block of that page, as one undo step. */
@@ -9366,7 +9504,13 @@ export default function App({ hostProposals = null }: {
     });
     markWorkspaceDirty();
     setActiveTab("layout");
-    setImportMsg(`${recipes.length} plot${recipes.length === 1 ? "" : "s"} added to the Layout tab.`);
+    const sheet = activeLayoutSheetName();
+    setImportMsg(recipes.length === 1 ? t("1 plot added to {sheet} on the Layout tab.", { sheet }) : t("{count} plots added to {sheet} on the Layout tab.", { count: recipes.length, sheet }));
+  }
+
+  /** The Layout sheet blocks are added to: the one last open on the Layout tab. */
+  function activeLayoutSheetName(): string {
+    return (layoutWorkspace.sheets.find((s0) => s0.id === layoutWorkspace.activeSheetId) ?? layoutWorkspace.sheets[0])?.name ?? "";
   }
 
   function openLayoutRecipeInGating(recipe: LayoutPlotRecipe | LayoutStrategyRecipe): void {
@@ -10183,22 +10327,97 @@ export default function App({ hostProposals = null }: {
       return undefined;
     }
   }
+  /** Stored layers a bundle of `ws` leaves out because the .zip would pass 4 GB with them. */
+  const bundleStoredLeftOutRef = useRef(0);
+
+  /**
+   * The stored layers a bundle of `ws` carries: for each file, the values of every matrix of the
+   * workspace applied to it this session or read from the bundle, other than the one in use (which
+   * the bundle's assays section holds).
+   */
+  async function storedLayersForBundle(ws: WorkspaceFileV3): Promise<{ source: StoredAssayLayerSource; lastUsed: number }[]> {
+    if (isSceHost) return [];
+    const store = storedAssaysRef.current;
+    if (store.size === 0) return [];
+    const profileIds = new Set(ws.compensation.lineages.flatMap(({ records }) => records.map(({ profileId }) => profileId)));
+    const layers: { source: StoredAssayLayerSource; lastUsed: number }[] = [];
+    for (let index = 0; index < ws.samples.length; index++) {
+      const entry = samples[index];
+      const fcsDigest = entry ? await fcsDigestOf(entry)?.catch(() => null) : null;
+      if (!fcsDigest) continue;
+      const inUse = ws.samples[index].assay.compensatedLayer;
+      const inUseSignature = inUse ? compensatedBindingSignature(inUse) : null;
+      for (const layer of store.all()) {
+        if (layer.fcsDigest !== fcsDigest || layer.bindingSignature === inUseSignature || !profileIds.has(layer.profileId)) continue;
+        if (layer.eventCount !== entry.sample.fcs.nEvents) continue;
+        layers.push({ source: await store.bundleSource(layer, ws.samples[index].dataPath), lastUsed: layer.lastUsed });
+      }
+    }
+    return layers;
+  }
+
   async function preparePortableBundle(ws: WorkspaceFileV3) {
     setStatusLine("Preparing portable workspace · hashing source data");
-    return createPortableWorkspaceV3ArchivePlan(
+    const options = {
+      onProgress: ({ phase, processedBytes, totalBytes }: { phase: string; processedBytes: number; totalBytes: number }) => {
+        const percent = totalBytes === 0 ? 100 : Math.round(processedBytes / totalBytes * 100);
+        setStatusLine(
+          `Preparing portable workspace · ${phase === "hashing-fcs" ? "source FCS" : "compensated assay"} · ${percent}%`,
+        );
+      },
+    };
+    let stored = await storedLayersForBundle(ws);
+    const plan = (layers: typeof stored) => createPortableWorkspaceV3ArchivePlan(
       ws,
       currentPortableSources(ws),
       bundleGatingML(),
-      {
-        onProgress: ({ phase, processedBytes, totalBytes }) => {
-          const percent = totalBytes === 0 ? 100 : Math.round(processedBytes / totalBytes * 100);
-          setStatusLine(
-            `Preparing portable workspace · ${phase === "hashing-fcs" ? "source FCS" : "compensated assay"} · ${percent}%`,
-          );
-        },
-      },
+      options,
+      layers.map(({ source }) => source),
     );
+    let made = await plan(stored);
+    bundleStoredLeftOutRef.current = 0;
+    const entrySize = (entry: (typeof made.entries)[number]) => ({
+      path: entry.path,
+      byteLength: "bytes" in entry ? entry.bytes.byteLength : entry.byteLength,
+    });
+    const fits = (entries: { path: string; byteLength: number }[]) =>
+      fitsInZip({ zipBytes: storedZipBytes(entries), fileCount: entries.length - 1 });
+    if (stored.length > 0 && !fits(made.entries.map(entrySize))) {
+      // A .zip holds 4 GB: the stored values used longest ago are left out (they are computed again
+      // when used) until the bundle fits; the files and the assays in use are always written.
+      const base = made.entries.map(entrySize).filter(({ path }) => !path.startsWith("stored-assays/"));
+      const kept = [...stored].sort((a, b) => b.lastUsed - a.lastUsed);
+      const sizes = (layers: typeof kept) => [
+        ...base,
+        ...(layers.length > 0 ? [{ path: STORED_ASSAY_MANIFEST_PATH, byteLength: 64 * 1024 }] : []),
+        ...layers.flatMap(({ source }, layerIndex) => source.columns.map((column, columnIndex) => ({
+          path: `stored-assays/${layerIndex}/${columnIndex}.f32`,
+          byteLength: column.byteLength,
+        }))),
+      ];
+      while (kept.length > 0 && !fits(sizes(kept))) kept.pop();
+      bundleStoredLeftOutRef.current = stored.length - kept.length;
+      stored = kept;
+      made = await plan(stored);
+    }
+    return made;
   }
+
+  /**
+   * After a bundle was written over the file the stored assays read from: they are read from the
+   * new file from now on.
+   */
+  async function rebindStoredAssays(handle: FileSystemFileHandle): Promise<void> {
+    const file = await handle.getFile();
+    const files = await readZipFileEntries(file, { select: (path) => path === STORED_ASSAY_MANIFEST_PATH });
+    const manifest = files[STORED_ASSAY_MANIFEST_PATH];
+    if (manifest) await storedAssaysRef.current.rebindToBundle(await locateStoredAssays(file, manifest));
+  }
+
+  /** What the save message adds when the bundle left stored values out. */
+  const storedLeftOutNote = () => bundleStoredLeftOutRef.current > 0
+    ? ` · ${t("{count} matrices' stored values left out to keep the bundle within 4 GB; they are computed again when used", { count: bundleStoredLeftOutRef.current })}`
+    : "";
 
   /**
    * Save the Drive workspace back to the lab Drive as reference JSON, or as a copy beside it, or
@@ -10556,7 +10775,9 @@ export default function App({ hostProposals = null }: {
         }
         await rememberAllHandles();
         setDirty(false);
-        setImportMsg(`Saved ${wsStorage === "bundle" ? "bundle" : "workspace"} · ${wsName}`);
+        setImportMsg(`Saved ${wsStorage === "bundle" ? `bundle · ${wsName}${storedLeftOutNote()}` : `workspace · ${wsName}`}`);
+        // The bundle was written over the file its stored values were read from.
+        if (wsStorage === "bundle") void rebindStoredAssays(wsHandle).catch(() => undefined);
         tourSignals.current.workspaceSaves++;
         return true;
       } else {
@@ -10574,7 +10795,8 @@ export default function App({ hostProposals = null }: {
   async function saveWorkspaceAs(): Promise<boolean> {
     const ws = buildWorkspaceFile();
     if (!ws) return false;
-    const base = sanitizeFilePart((fileName || "workspace").replace(/\.[^.]+$/, ""));
+    // Named after the workspace file it was opened from or last saved as, else the active file.
+    const base = sanitizeFilePart((wsName || fileName || "workspace").replace(/\.[^.]+$/, ""));
     try {
       const data = packReferenceWorkspace(ws);
       if (supportsFileSystemAccess()) {
@@ -10697,7 +10919,8 @@ export default function App({ hostProposals = null }: {
         `Saved portable bundle · ${savedName}` +
           (ws.version === WORKSPACE_VERSION_3 && ws.samples.some(({ assay }) => assay.compensatedLayer !== null)
             ? " · compensated assays embedded"
-            : ""),
+            : "") +
+          (ws.version === WORKSPACE_VERSION_3 ? storedLeftOutNote() : ""),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -11265,11 +11488,27 @@ export default function App({ hostProposals = null }: {
         }));
         let fcsDigest: Awaited<ReturnType<typeof digestFcsBytes>> | null = null;
         try {
-          if (task.entry.bytes) {
-            fcsDigest = await digestFcsBytes(task.entry.bytes);
-          }
+          fcsDigest = await fcsDigestOf(task.entry);
         } catch {
           // Web Crypto/local storage is an acceleration only. Fall through to exact recomputation.
+        }
+        assertNotCancelled();
+        // This session's stored values first (a Revert reopens the workspace it came from).
+        const stored = fcsDigest
+          ? storedAssaysRef.current.find(fcsDigest, compensatedBindingSignature(task.binding))
+          : undefined;
+        if (stored) {
+          try {
+            task.entry.sample.installCompensatedLayer(
+              { metadata: task.binding, columns: await storedAssaysRef.current.readColumns(stored) },
+              { activeLayer: task.assay.activeLayer },
+            );
+            completedEvents += task.entry.sample.fcs.nEvents;
+            setRestoreStatus("preparing", completedEvents);
+            continue;
+          } catch {
+            // Read from the local cache or solved instead.
+          }
         }
         assertNotCancelled();
         const cached = fcsDigest
@@ -11776,6 +12015,15 @@ export default function App({ hostProposals = null }: {
       compensationManagerRef.current!.resetWorkspace(nextWorkspaceId);
       compensationWorkspaceReset = true;
       if (ws.version === WORKSPACE_VERSION_3) {
+        // The stored values of this workspace's own matrices are kept (Revert reopens the same
+        // workspace) and any other's let go; a bundle adds the ones it carries.
+        await storedAssaysRef.current.retainProfiles(new Set(
+          ws.compensation.lineages.flatMap(({ records }) => records.map(({ profileId }) => profileId)),
+        ));
+        if (envelope.storedAssays) storedAssaysRef.current.addBundle(envelope.storedAssays);
+        if (envelope.storedAssaysProblem) {
+          console.warn(`${envelope.storedAssaysProblem} The workspace opens without them; a matrix not in use is computed again when used.`);
+        }
         if (envelope.portableAssays) {
           const totalCompensatedEvents = ws.samples.reduce(
             (total, workspaceSample, index) => total +
@@ -11822,6 +12070,8 @@ export default function App({ hostProposals = null }: {
             for (let index = 0; index < ws.samples.length; index++) {
               const binding = ws.samples[index].assay.compensatedLayer;
               const fcsDigest = restored.sourceDigests[ws.samples[index].dataPath];
+              const fcsBytes = entries[index].bytes;
+              if (fcsDigest && fcsBytes) fcsDigestsRef.current.set(fcsBytes, Promise.resolve(fcsDigest));
               if (!binding || !fcsDigest || keepsNothingLocal()) continue;
               void writeCachedCompensatedAssay(
                 fcsDigest,
@@ -11837,6 +12087,7 @@ export default function App({ hostProposals = null }: {
         } else {
           await restoreSavedWorkspaceCompensation(ws, entries);
         }
+        void rememberInstalledLayers(entries).catch(() => undefined);
       }
       if (!driveTarget) queueCheckpoint("after-workspace-open");
       skipDirtyRef.current = true;
@@ -13005,7 +13256,13 @@ export default function App({ hostProposals = null }: {
       cancelled = true;
     };
   }, [samples]);
-  const libraryRows = (numbers: MatrixNumbers | null): MatrixLibraryRow[] => buildMatrixLibrary(
+  // The list shows the matrices of the viewed file's kind: a CyTOF file's are the workspace's CyTOF
+  // matrices, every one applied and every version of it kept.
+  const libraryKind = sample?.instrument === "cytof" ? "cytof-spillover" : "flow-spillover";
+  const libraryRows = (
+    numbers: MatrixNumbers | null,
+    kind: "flow-spillover" | "cytof-spillover" = libraryKind,
+  ): MatrixLibraryRow[] => buildMatrixLibrary(
     workspaceCompensation,
     [...embeddedMatrices.values()],
     samples.map((entry): FileCompensationUse => {
@@ -13015,7 +13272,7 @@ export default function App({ hostProposals = null }: {
         ? { kind: "profile", profileId: status.metadata.profileId }
         : { kind: "embedded", key: embeddedMatrices.get(entry.id)?.key ?? null };
     }),
-    "flow-spillover",
+    kind,
     numbers,
   );
   const matrixRows: MatrixLibraryRow[] = activeTab === "compensation" ? libraryRows(matrixNumbers) : [];
@@ -13024,7 +13281,16 @@ export default function App({ hostProposals = null }: {
   // read (embeddedMatricesFor), never on the last workspace's.
   useEffect(() => {
     if (samples.length === 0 || embeddedMatricesFor !== samples) return;
-    const next = numberMatrices(matrixNumbers, libraryRows(matrixNumbers));
+    let next = numberMatrices(matrixNumbers, libraryRows(matrixNumbers, "flow-spillover"));
+    // CyTOF files carry no matrix of their own, so a CyTOF matrix is never the primary one: the
+    // data came in with none.
+    const cytofRows = libraryRows(matrixNumbers, "cytof-spillover");
+    if (cytofRows.length > 0) {
+      next = numberMatrices(
+        next?.primary === undefined ? { next: next?.next ?? 1, byKey: next?.byKey ?? {}, primary: null } : next,
+        cytofRows,
+      );
+    }
     if (next !== matrixNumbers) setMatrixNumbers(next);
     // libraryRows reads only the dependencies listed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -13059,6 +13325,7 @@ export default function App({ hostProposals = null }: {
           state.gates,
           state.populations,
           state.root_population_id ?? null,
+          row.profile?.scientific.kind === "cytof-spillover" ? row.profile.scientific.includedChannels : undefined,
         )
       : {
           fileCount: samples.length,
@@ -13104,6 +13371,18 @@ export default function App({ hostProposals = null }: {
       }));
       markWorkspaceDirty();
     },
+    // One revision leaves its lineage; the baseline and every version another was edited from stay.
+    onDeleteVersion: (version) => {
+      const profileId = version.profile?.profileId;
+      if (!profileId || !version.canDelete) return;
+      setWorkspaceCompensation((current) => ({
+        ...current,
+        lineages: current.lineages.map((lineage) => lineage.baselineProfileId !== version.baselineProfileId
+          ? lineage
+          : { ...lineage, records: lineage.records.filter((record) => record.profileId !== profileId) }),
+      }));
+      markWorkspaceDirty();
+    },
     onImport: async (file) => {
       const pnns = new Set(samples
         .filter((entry) => entry.sample.instrument === "flow")
@@ -13129,6 +13408,18 @@ export default function App({ hostProposals = null }: {
       return imported.roundedCoefficients > 0
         ? `${added} ${t("{count} coefficients within 0.001% of 0 or 100% were set to exactly 0 or 100% so it could be stored.", { count: imported.roundedCoefficients })}`
         : added;
+    },
+    // A matrix calculated from controls joins the list as an imported one does: not in use.
+    controls: isSceHost || libraryKind === "cytof-spillover" ? undefined : {
+      files: samples
+        .filter((entry) => entry.sample.instrument === "flow")
+        .map((entry) => ({ id: entry.id, name: entry.name, sample: entry.sample })),
+      onAdd: (profile) => {
+        const same = matrixRows.find(({ matrixHash }) => matrixHash === profile.matrixHash);
+        if (same) return t("The calculated matrix is the same as {name}, which is already in the list.", { name: same.name });
+        addMatrixLineage(profile);
+        return t("Added {name}, not in use.", { name: profile.name });
+      },
     },
   };
 
@@ -15160,12 +15451,16 @@ export default function App({ hostProposals = null }: {
   // Where the plot card's bottom-left corner sits in the plot area, for the swap button there: left
   // of the X axis's ticks and below the Y axis's, where nothing else is drawn. The renderer sizes the
   // card, so it is measured, and again whenever the card or the area changes size.
-  const [plotCorner, setPlotCorner] = useState<{ left: number; top: number } | null>(null);
+  const [plotCorner, setPlotCorner] = useState<{ left: number; top: number; right: number } | null>(null);
   useLayoutEffect(() => {
     const area = plotAreaRef.current;
     const plot = area?.querySelector<HTMLElement>(".gl-plot");
     if (!area || !plot) return;
-    const measure = () => setPlotCorner(plot.offsetHeight > 0 ? { left: plot.offsetLeft, top: plot.offsetTop + plot.offsetHeight } : null);
+    const measure = () => setPlotCorner((was) => {
+      if (plot.offsetHeight <= 0) return null;
+      const next = { left: plot.offsetLeft, top: plot.offsetTop + plot.offsetHeight, right: plot.offsetLeft + plot.offsetWidth };
+      return was && was.left === next.left && was.top === next.top && was.right === next.right ? was : next;
+    });
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
@@ -15471,6 +15766,173 @@ export default function App({ hostProposals = null }: {
     return out;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [payload, sample, panelVersion, pointAlpha, pointSize, contourLevels, densityColorPower, controlAlpha, gateEdgeMode, snapToGates, gateReferences, colouredGates, gateLineWidth, gateLabelBackground]);
+
+  // ── More than one plot (ui/gatingPlotViews.ts) ─────────────────────────────────────────────
+  const multiPlot = gatingPlots.slots.length > 1;
+  /** What the selected plot shows now, as a view another plot could keep. */
+  const currentPlotView = (): CompanionPlotView => ({
+    populationId: state.active_population_id ?? state.root_population_id ?? null,
+    selectedPopulationIds: state.selected_pop_ids ?? [],
+    xKey: sample?.channels[xIdx]?.key ?? "",
+    yKey: sample?.channels[yIdx]?.key ?? "",
+    histogram: histogramView,
+    selectedGateId: state.selected_gate_id ?? null,
+    selectedGateIds: state.selected_gate_ids ?? [],
+  });
+  /** A plot's view made the selected plot's: the same state a click in the tree or an axis picker sets. */
+  const loadPlotView = (view: CompanionPlotView) => {
+    if (sample) {
+      const xi = sample.index(view.xKey);
+      const yi = sample.index(view.yKey);
+      if (xi !== undefined) setXIdx(xi);
+      if (yi !== undefined) setYIdx(yi);
+    }
+    const populationId = view.populationId && state.populations[view.populationId] ? view.populationId : state.root_population_id;
+    if (populationId) {
+      dispatch({ type: "selectPopulations", activeId: populationId, popIds: view.selectedPopulationIds.filter((id) => state.populations[id]) });
+    }
+    setHistogramView(view.histogram);
+    // Each plot keeps its own selected gate: the one this plot had when it was left, or none.
+    const gateId = view.selectedGateId && state.gates[view.selectedGateId] ? view.selectedGateId : null;
+    dispatch({ type: "selectGates", gateId, gateIds: (view.selectedGateIds ?? []).filter((id) => state.gates[id]) });
+    // A tool, a fit or a held range belongs to the plot that was selected.
+    setDrawMode("navigate");
+    setFitGate(null);
+    setXRange(null);
+    setYRange(null);
+  };
+  // A side set by the grip is for the plots as they were: adding or removing one fits them to the area again.
+  const addPlot = () => {
+    setGatingPlots((plots) => addGatingPlot(plots, currentPlotView()));
+    setGatingPlotSide(null);
+  };
+  const selectPlot = (index: number) => {
+    const next = selectGatingPlot(gatingPlots, index, currentPlotView());
+    if (next.plots === gatingPlots) return;
+    setGatingPlots(next.plots);
+    if (next.load) loadPlotView(next.load);
+  };
+  const removePlot = (index: number) => {
+    const next = removeGatingPlot(gatingPlots, index);
+    if (next.plots === gatingPlots) return;
+    setGatingPlots(next.plots);
+    setGatingPlotSide(null);
+    if (next.load) loadPlotView(next.load);
+  };
+  // The other plots are built from deferred copies of what changes with every gate edit, so the
+  // selected plot is handed its frame first and theirs follow. With one plot nothing is deferred.
+  const companionState = useDeferredValue(multiPlot ? state : null);
+  const companionGating = useDeferredValue(multiPlot ? viewGating : null);
+  const companionGates = useDeferredValue(multiPlot ? plottedGates : null);
+  const companionScales = useDeferredValue(multiPlot ? globalScales : null);
+  /** What every other plot is built from but its view; a new object whenever any of it changes. */
+  const companionInputs = useMemo((): Omit<CompanionPlotInput, "view"> | null => {
+    if (!multiPlot || !sample || !activeSampleId || !companionState || !companionGating || !companionGates || !companionScales) return null;
+    // Pooled, the same files as the selected plot: this panel, this assay layer (plotPool), each
+    // under its own gating once the background pass has reached it.
+    let pool: CompanionPoolFile[] | null = null;
+    if (poolSelection) {
+      pool = includedSamples
+        .filter((entry) =>
+          entry.sample.workspaceScaleContextKey === activeWorkspaceScaleContextKey &&
+          panelKeyOf(entry.sample) === primaryPanelKey)
+        .map((entry) => {
+          const cached = entry.id === activeSampleId ? null : inactiveGatingCacheRef.current.get(entry.id);
+          const current = cached &&
+            cached.sample === entry.sample &&
+            cached.dataRevision === entry.sample.dataRevision &&
+            cached.gateVersion === companionState.gate_version;
+          return { id: entry.id, name: entry.name, sample: entry.sample, gating: current ? displayGatingOf(cached) : null };
+        });
+      // The viewed file alone is not a pool: its own counts are exact.
+      if (pool.length === 1 && pool[0].id === activeSampleId) pool = null;
+    }
+    return {
+      file: { id: activeSampleId, name: fileName, sample, gating: companionGating },
+      state: companionState,
+      drawnGates: companionGates,
+      // Every gate on the plot's channels unless the user asked for the branch rule there too.
+      branchGatesOnly: otherPlotsEveryGate ? false : branchGatesOnly,
+      showUnownedGates,
+      globalScales: companionScales,
+      pool,
+      countScope: (kind, count) => kind === "pooled"
+        ? { text: t("pooled"), hint: t("Pooled over {count} files: events inside the gate as a share of the active population, both summed across those files.", { count }) }
+        : { text: t("blue file only"), hint: t("Counts from the axes file alone while the other pooled files are gated in the background; the plot pools {count} files.", { count }) },
+      look: {
+        mode, maxEvents, contourThreshold, contourLevels, pointAlpha, pointSize, densityColorPower,
+        gateEdgeMode, colouredGates, gateLineWidth, gateLabelBackground,
+      },
+    };
+    // As for the selected plot's payload: the revision, context and version keys say when the
+    // viewed Sample changed in place, and inactiveGatingCacheVersion when another file's gating landed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    multiPlot, sample, activeSampleId, fileName, companionState, companionGating, companionGates, companionScales,
+    branchGatesOnly, otherPlotsEveryGate, showUnownedGates, poolSelection, includedSamples, activeWorkspaceScaleContextKey, panelKeyOf, primaryPanelKey,
+    inactiveGatingCacheVersion, mode, maxEvents, contourThreshold, contourLevels, pointAlpha, pointSize, densityColorPower,
+    gateEdgeMode, colouredGates, gateLineWidth, gateLabelBackground, activeDataRevision, activeDisplayContextKey, scalesVersion,
+    instrumentMode, panelVersion, t,
+  ]);
+  // Each other plot, built again only when its view or what it is built from changed: selecting a
+  // plot changes the view of the plot that was selected and of no other, so the rest keep the
+  // object they drew and are not built or drawn again (each is ~ a pass over the file's events).
+  const companionBuiltRef = useRef(new Map<number, { view: CompanionPlotView; inputs: object; plot: CompanionPlot | null }>());
+  const companionPlots = useMemo(() => {
+    const built = companionBuiltRef.current;
+    if (!companionInputs) {
+      built.clear();
+      return [];
+    }
+    const plots = gatingPlots.slots.map((slot, index) => {
+      if (index === gatingPlots.selected) return null;
+      const kept = built.get(slot.id);
+      if (kept && kept.view === slot.view && kept.inputs === companionInputs) return kept.plot;
+      const plot = buildCompanionPlot({ ...companionInputs, view: slot.view });
+      built.set(slot.id, { view: slot.view, inputs: companionInputs, plot });
+      return plot;
+    });
+    const live = new Set(gatingPlots.slots.map((slot) => slot.id));
+    for (const id of [...built.keys()]) if (!live.has(id)) built.delete(id);
+    return plots;
+  }, [gatingPlots, companionInputs]);
+  // The plots share the area as the largest squares that fit it (plotGridShape); measured, since
+  // the engine sizes each plot from the width of the cell it is in.
+  useEffect(() => {
+    const grid = plotGridRef.current;
+    if (!multiPlot || !grid || typeof ResizeObserver === "undefined") return;
+    const measure = () => setPlotGridBox((box) => {
+      const width = grid.clientWidth;
+      const height = grid.clientHeight;
+      return box.width === width && box.height === height ? box : { width, height };
+    });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [multiPlot, activeTab]);
+  const plotGridStyle = useMemo(() => {
+    if (!multiPlot) return undefined;
+    // A gap between the plots and a margin around them, room for the selected plot's ring (styles.css).
+    const gap = 10;
+    const pad = 6;
+    const width = plotGridBox.width - 2 * pad;
+    const height = plotGridBox.height - 2 * pad;
+    const shape = plotGridShape(gatingPlots.slots.length, width, height);
+    // A side set by the grip makes every cell that plot's size (the engine draws 32 px narrower than its cell).
+    if (gatingPlotSide) {
+      return { gap, padding: pad, gridTemplateColumns: `repeat(${shape.columns}, ${gatingPlotSide + 32}px)`, gridAutoRows: `${gatingPlotSide + 32}px` };
+    }
+    if (plotGridBox.width <= 0 || plotGridBox.height <= 0) {
+      return { gap, padding: pad, gridTemplateColumns: `repeat(${shape.columns}, minmax(0, 1fr))` };
+    }
+    // Never under the engine's smallest plot and its margin; a smaller area scrolls.
+    const side = Math.max(336, Math.floor(Math.min(
+      (width - (shape.columns - 1) * gap) / shape.columns,
+      (height - (shape.rows - 1) * gap) / shape.rows,
+    )));
+    return { gap, padding: pad, gridTemplateColumns: `repeat(${shape.columns}, ${side}px)`, gridAutoRows: `${side}px` };
+  }, [multiPlot, gatingPlots.slots.length, plotGridBox, gatingPlotSide]);
 
   /** The X values of the points the scatter plot draws, for the histogram view: same pool, same cap. */
   const histogramValues = useMemo(() => {
@@ -15948,7 +16410,7 @@ export default function App({ hostProposals = null }: {
             </div>
           </details>
         ) : error && (
-          <span className="gl-error">
+          <span className="gl-error" title={t(error)}>
             <span className="gl-error-line">⚠ {t(error)}</span>
           </span>
         )}
@@ -16496,6 +16958,15 @@ export default function App({ hostProposals = null }: {
                   onClick={resetAxisRanges}><ResetIcon /></button>
                 <button
                   type="button"
+                  className="gl-tool"
+                  data-plot-add
+                  title={t("Show another plot beside this one, up to four. Click a plot to work on it; the others follow the events as gates change.")}
+                  aria-label={t("Add a plot")}
+                  disabled={gatingPlots.slots.length >= MAX_GATING_PLOTS}
+                  onClick={addPlot}
+                ><AddPlotIcon /></button>
+                <button
+                  type="button"
                   className={`gl-scale-lock-button${lockScalesBetweenFiles ? " active" : ""}`}
                   aria-pressed={lockScalesBetweenFiles}
                   title={t(lockScalesBetweenFiles
@@ -16987,6 +17458,15 @@ export default function App({ hostProposals = null }: {
                     <input type="checkbox" className="gl-plot-shows-unowned" disabled={!branchGatesOnly} checked={showUnownedGates} onChange={(e) => setShowUnownedGates(e.target.checked)} />
                     {t("unowned gates")}
                   </label>
+                  {multiPlot && (
+                    <label
+                      className="gl-check"
+                      title={t("Draw every gate on their channels on the plots other than the selected one, so populations are compared against the same gates. Unchecked, they follow the branch gates rule as the selected plot does.")}
+                    >
+                      <input type="checkbox" className="gl-plot-shows-others" checked={otherPlotsEveryGate} onChange={(e) => setOtherPlotsEveryGate(e.target.checked)} />
+                      {t("every gate on the other plots")}
+                    </label>
+                  )}
                 </span>
                 </div>
               </details>
@@ -17258,10 +17738,21 @@ export default function App({ hostProposals = null }: {
                 flow scatter axes. CyTOF is excluded deliberately: arcsinh cofactor 5 is the
                 field convention and is not offered as a choice. Gates live in raw space for
                 flow, so nothing there moves a gate; it only changes what the axis looks like. */}
+            {/* One plot fills this as it always has. Several share it as a grid of squares: the
+                selected plot is the plot area below, placed by its number, and the others follow it. */}
+            <div
+              className={"gl-plot-grid" + (multiPlot ? " is-multi" : "")}
+              ref={plotGridRef}
+              style={plotGridStyle}
+            >
             <div
               className="gl-plot-area"
               ref={plotAreaRef}
-              style={{ cursor: histogramView ? "default" : drawMode === "navigate" ? "grab" : "crosshair" }}
+              data-plot-number={multiPlot ? gatingPlots.selected + 1 : undefined}
+              style={{
+                cursor: histogramView ? "default" : drawMode === "navigate" ? "grab" : "crosshair",
+                ...(multiPlot ? { order: gatingPlots.selected } : {}),
+              }}
               onContextMenu={(event) => {
                 // A vertex or an edge stops the event before it gets here, with its own menu.
                 if (!sample) return;
@@ -17379,8 +17870,23 @@ export default function App({ hostProposals = null }: {
                   <SwapAxesIcon />
                 </button>
               )}
+              {activeTab === "gating" && !histogramView && plotCorner && (
+                <GatingPlotResizeHandle
+                  corner={{ left: plotCorner.right, top: plotCorner.top }}
+                  // The engine's side: the card is 18 px wider (its Y-title gutter).
+                  side={() => {
+                    const card = plotAreaRef.current?.querySelector<HTMLElement>(".gl-plot");
+                    return card && card.offsetWidth > 18 ? card.offsetWidth - 18 : null;
+                  }}
+                  onCommit={setGatingPlotSide}
+                  onFit={() => setGatingPlotSide(null)}
+                />
+              )}
               <GatingPlot
                 payload={displayed}
+                exactSize={multiPlot}
+                // With several plots the side is the cells' (plotGridStyle).
+                plotSide={multiPlot ? null : gatingPlotSide}
                 actions={gatingPlotActions}
                 mode={drawMode === "draw-range" || drawMode === "draw-bisector" ? "navigate" : drawMode}
                 visible={activeTab === "gating" && !histogramView}
@@ -17724,6 +18230,46 @@ export default function App({ hostProposals = null }: {
                   onCancel={() => setFitGate(null)}
                 />
               )}
+              {multiPlot && (
+                // The population's name, as the other plots carry theirs.
+                <div className="gl-plot-peer-name">
+                  {[state.active_population_id ?? state.root_population_id, ...(state.selected_pop_ids ?? []).filter((id) => id !== state.active_population_id)]
+                    .map((id) => (id ? state.populations[id]?.name ?? "" : ""))
+                    .filter(Boolean)
+                    .join(" + ")}
+                </div>
+              )}
+              {multiPlot && (
+                <button
+                  type="button"
+                  className="gl-plot-remove"
+                  aria-label={t("Remove plot {number}", { number: gatingPlots.selected + 1 })}
+                  title={t("Remove this plot")}
+                  onClick={() => removePlot(gatingPlots.selected)}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            {multiPlot && gatingPlots.slots.flatMap((slot, index) => {
+              if (index === gatingPlots.selected) return [];
+              // Each plot keeps its engine instance (gatingPlotViews), so one that did not change is not drawn again.
+              return [(
+                <div key={`plot-${slot.instance}`} className="gl-plot-peer-cell" style={{ order: index }}>
+                  <GatingCompanionPlot
+                    instance={slot.instance}
+                    number={index + 1}
+                    view={slot.view}
+                    plot={companionPlots[index] ?? null}
+                    visible={activeTab === "gating"}
+                    fontSizes={gatingFontSizes}
+                    channelLabel={(key) => sample.labelForKey(key)}
+                    onSelect={() => selectPlot(index)}
+                    onRemove={() => removePlot(index)}
+                  />
+                </div>
+              )];
+            })}
             </div>
             {/* A slot of its own height, so a legend appearing or growing does not resize the plot. */}
             <div className="gl-plot-legend-slot">
@@ -17772,6 +18318,8 @@ export default function App({ hostProposals = null }: {
             {activeTab === "proportions" && (
               <PlottingChartsTab
                 key={illustVersion}
+                checkedSampleIds={checkedSampleIds}
+                onOpenGating={() => setActiveTab("gating")}
                 samples={samples.map(entry => ({ ...entry, hierarchyId: hierarchyOfFile(entry.id) }))}
                 activeSampleId={activeSampleId}
                 state={state}
@@ -18021,7 +18569,11 @@ export default function App({ hostProposals = null }: {
                   compensationOn={compensationOn}
                   onApplyProfile={applyCompensationProfile}
                   otherEmbeddedLayerFiles={embeddedLayerEntries().filter((entry) => entry.id !== activeSampleId).map((entry) => entry.name)}
-                  onRemoveProfile={isSceHost ? undefined : removeCompensationProfile}
+                  onRemoveProfile={isSceHost ? undefined : async () => {
+                    await removeCompensationProfile();
+                    // The removed matrix's values leave memory for disk.
+                    void rememberInstalledLayers(samplesRef.current).catch(() => undefined);
+                  }}
                   existingHostAssays={hostExistingCompensatedAssays}
                   onAdoptExistingAssay={
                     isSceHost && host.compensation

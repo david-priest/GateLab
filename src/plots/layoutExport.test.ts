@@ -14,6 +14,7 @@ const pdfSpy = vi.hoisted(() => ({
   saved: [] as string[],
   svg: vi.fn(),
   rasters: [] as unknown[],
+  deleted: [] as number[],
 }));
 vi.mock("./gridExport", async (original) => ({
   maxRasterDpi: (await original<typeof import("./gridExport")>()).maxRasterDpi,
@@ -22,8 +23,14 @@ vi.mock("./gridExport", async (original) => ({
 }));
 vi.mock("jspdf", () => ({
   jsPDF: class {
-    constructor(options: unknown) { pdfSpy.documents.push(options); }
-    addPage(...args: unknown[]) { pdfSpy.pages.push(args); }
+    size: number[];
+    constructor(options: { format: number[] }) { pdfSpy.documents.push(options); this.size = options.format; }
+    addPage(...args: unknown[]) { pdfSpy.pages.push(args); this.size = args[0] as number[]; }
+    // What a page the writer stopped on is replaced through.
+    internal = { pageSize: { getWidth: () => this.size[0], getHeight: () => this.size[1] } };
+    isAdvancedAPI() { return false; }
+    getNumberOfPages() { return 1 + pdfSpy.pages.length - pdfSpy.deleted.length; }
+    deletePage(page: number) { pdfSpy.deleted.push(page); }
     addImage(...args: unknown[]) { pdfSpy.images.push(args); }
     save(name: string) { pdfSpy.saved.push(name); }
   },
@@ -194,7 +201,7 @@ describe("writeComposedPages as PDF", () => {
   const composed = () => [1, 2].map(() => ({ root: document.createElementNS(svgNs, "svg") as SVGSVGElement, width: 1123, height: 794, widthMm: 297, heightMm: 210 }));
   const a4 = { width: 297 * (72 / 25.4), height: 210 * (72 / 25.4) };
   beforeEach(() => {
-    pdfSpy.documents = []; pdfSpy.pages = []; pdfSpy.images = []; pdfSpy.saved = []; pdfSpy.rasters = [];
+    pdfSpy.documents = []; pdfSpy.pages = []; pdfSpy.images = []; pdfSpy.saved = []; pdfSpy.rasters = []; pdfSpy.deleted = [];
     pdfSpy.svg.mockReset();
   });
 
@@ -238,6 +245,9 @@ describe("writeComposedPages as PDF", () => {
     }
     expect(pdfSpy.images).toEqual([[pdfSpy.rasters[0], "PNG", 0, 0, a4.width, a4.height, undefined, "FAST"]]);
     expect(pdfSpy.rasters).toHaveLength(1);
+    // The page the writer stopped on is replaced with an empty one of its size before the image is drawn.
+    expect(pdfSpy.deleted).toEqual([1]);
+    expect(pdfSpy.pages).toEqual([[[a4.width, a4.height], "landscape"], [[a4.width, a4.height], "landscape"]]);
   });
 
   it("reports which pages it drew as an image, for the export's message", async () => {

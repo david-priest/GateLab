@@ -4,7 +4,9 @@
 
 import { useRef, useState, type ChangeEvent, type KeyboardEvent } from "react";
 import { pickFilesOrInput } from "../engine/fsAccess";
-import { copyName, type MatrixLibraryRow, type MatrixSource, type MatrixSwitchPlan } from "./compensationLibrary";
+import { copyName, type MatrixLibraryRow, type MatrixSource, type MatrixSwitchPlan, type MatrixVersionRow } from "./compensationLibrary";
+import type { BaselineCompensationProfileRecord } from "../engine/compensationProfileRecord";
+import { CompensationControlsDialog, type ControlsDialogFile } from "./CompensationControlsDialog";
 import { CompensationMatrixExportDialog } from "./CompensationMatrixExportDialog";
 import { useI18n } from "./i18n";
 import { MatrixIcon, MoreIcon } from "./icons";
@@ -34,8 +36,24 @@ export interface CompensationMatricesProps {
   /** Set by the Compensation tab: the copy is active, so the tab shows its coefficient editor. */
   readonly onEditStarted?: (name: string) => void;
   readonly onDelete: (row: MatrixLibraryRow) => void;
+  /** Removes one version of a matrix (a revision no file uses and none was edited from). */
+  readonly onDeleteVersion?: (row: MatrixVersionRow) => void;
   /** Adds the file's matrix to the list without using it; resolves to what to tell the user. */
   readonly onImport: (file: File) => Promise<string>;
+  /**
+   * Set where Import CSV/TSV… is the Compensation tab's own (a CyTOF matrix, whose NNLS channels
+   * are chosen before it is applied): the button calls it instead of reading the file here.
+   */
+  readonly chooseImport?: () => void;
+  /**
+   * "Calculate from controls…": the workspace's flow files, and what adds the calculated matrix to
+   * the list without using it (it returns what to tell the user). Absent where matrices are not
+   * stored here (a hosted SCE).
+   */
+  readonly controls?: {
+    readonly files: readonly ControlsDialogFile[];
+    readonly onAdd: (profile: BaselineCompensationProfileRecord) => string;
+  };
 }
 
 function sourceText(source: MatrixSource, t: ReturnType<typeof useI18n>["t"]): string {
@@ -44,6 +62,7 @@ function sourceText(source: MatrixSource, t: ReturnType<typeof useI18n>["t"]): s
   if (source.type === "imported") return t("Imported · {file}", { file: source.fileName });
   if (source.type === "edited") return t("Edited from {name}", { name: source.from });
   if (source.type === "empty") return t("Empty");
+  if (source.type === "calculated") return t("Calculated · {count} controls", { count: source.controls });
   return t("Preset · {name}", { name: source.presetId });
 }
 
@@ -80,7 +99,10 @@ export function CompensationMatrices({
   onDuplicateAndEdit,
   onEditStarted,
   onDelete,
+  onDeleteVersion,
   onImport,
+  chooseImport,
+  controls,
 }: CompensationMatricesProps) {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -89,7 +111,11 @@ export function CompensationMatrices({
   /** The row "Duplicate and edit…" copies, and the copy's name. */
   const [editing, setEditing] = useState<{ row: MatrixLibraryRow; copy: string } | null>(null);
   const [deleting, setDeleting] = useState<MatrixLibraryRow | null>(null);
+  const [deletingVersion, setDeletingVersion] = useState<MatrixVersionRow | null>(null);
+  /** Versions shown or hidden by the user; the active matrix's are shown until then. */
+  const [versionsShown, setVersionsShown] = useState<Readonly<Record<string, boolean>>>({});
   const [exporting, setExporting] = useState<MatrixLibraryRow | null>(null);
+  const [calculating, setCalculating] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
 
   const importFile = async (file: File) => {
@@ -125,6 +151,54 @@ export function CompensationMatrices({
     } catch (cause) {
       setMessage({ text: cause instanceof Error ? cause.message : String(cause), error: true });
     }
+  };
+
+  /** A version as the dialogs and messages name it: the matrix's name and its version number. */
+  const labelled = (version: MatrixVersionRow): MatrixVersionRow => ({
+    ...version,
+    name: t("{name}, version {version}", { name: version.name, version: version.version }),
+  });
+
+  const versionMenuFor = (version: MatrixVersionRow): MenuEntry[] => [
+    {
+      label: t("Use this version…"),
+      className: "gl-comp-version-use",
+      disabled: busy || !onUse || (version.active && version.filesUsing === fileCount),
+      title: !onUse
+        ? t("The matrix of a hosted SCE is chosen in R.")
+        : version.active && version.filesUsing === fileCount
+          ? t("Every file is already compensated with this version.")
+          : t("Compensate every file with this version. The other versions stay as they are."),
+      onClick: () => setSwitching(labelled(version)),
+    },
+    {
+      label: t("Duplicate and edit…"),
+      className: "gl-comp-version-edit",
+      disabled: busy || !onDuplicateAndEdit,
+      title: !onDuplicateAndEdit
+        ? t("The matrix of a hosted SCE is chosen in R.")
+        : t("Copy this version as a new matrix, use the copy for every file and edit its coefficients beside the plots. This version stays as it is."),
+      onClick: () => setEditing({ row: labelled(version), copy: copyName(labelled(version).name, new Set(rows.map(({ name }) => name))) }),
+    },
+    { label: t("Duplicate"), className: "gl-comp-version-duplicate", disabled: busy, onClick: () => void duplicate(labelled(version)) },
+    { label: t("Export CSV…"), className: "gl-comp-version-export", onClick: () => setExporting(labelled(version)) },
+    ...(onDeleteVersion && version.canDelete
+      ? [{ label: t("Delete…"), className: "gl-comp-version-delete", danger: true, disabled: busy, onClick: () => setDeletingVersion(version) }]
+      : []),
+  ];
+
+  const versionText = (version: MatrixVersionRow): string => {
+    const made = new Date(version.profile?.createdAt ?? "");
+    const when = Number.isNaN(made.getTime()) ? "" : ` · ${made.toLocaleString()}`;
+    const what = version.parentVersion === null
+      ? t("Baseline")
+      : version.revisionReason === "reset-to-baseline"
+        ? t("Reset to the baseline from version {version}", { version: version.parentVersion })
+        : t("Edited from version {version}", { version: version.parentVersion });
+    const using = version.filesUsing > 0 && !(version.active && version.filesUsing === fileCount)
+      ? ` · ${t("{used} of {files} files", { used: version.filesUsing, files: fileCount })}`
+      : "";
+    return `${what}${when}${using}`;
   };
 
   const menuFor = (row: MatrixLibraryRow): MenuEntry[] => [
@@ -174,9 +248,20 @@ export function CompensationMatrices({
     <section className="gl-comp-matrices" aria-labelledby="comp-matrices-heading">
       <div className="gl-comp-matrices-head">
         <h3 id="comp-matrices-heading">{t("Matrices")}</h3>
-        <button type="button" className="gl-mini-btn" disabled={busy} onClick={chooseFile}>
+        <button type="button" className="gl-mini-btn" disabled={busy} onClick={chooseImport ?? chooseFile}>
           {t("Import CSV/TSV…")}
         </button>
+        {controls && (
+          <button
+            type="button"
+            className="gl-mini-btn gl-comp-lib-calculate"
+            disabled={busy}
+            title={t("Calculate a spillover matrix from single-stained control files. It is added to this list and compensates no file until you use it.")}
+            onClick={() => setCalculating(true)}
+          >
+            {t("Calculate from controls…")}
+          </button>
+        )}
         <button
           type="button"
           className="gl-mini-btn gl-comp-lib-export-active"
@@ -244,6 +329,46 @@ export function CompensationMatrices({
                 icon={<MoreIcon size={16} />}
                 className="gl-comp-lib-menu"
               />
+              {row.versions.length > 1 && (() => {
+                const shown = versionsShown[row.id] ?? row.active;
+                const listId = `comp-versions-${row.id.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+                return (
+                  <>
+                    <button
+                      type="button"
+                      className="gl-comp-lib-versions-toggle"
+                      aria-expanded={shown}
+                      aria-controls={listId}
+                      onClick={() => setVersionsShown((current) => ({ ...current, [row.id]: !shown }))}
+                    >
+                      {t("{count} versions", { count: row.versions.length })}
+                    </button>
+                    {shown && (
+                      <ol id={listId} className="gl-comp-lib-versions" aria-label={t("Versions of {name}", { name: row.name })}>
+                        {[...row.versions].reverse().map((version) => (
+                          <li
+                            key={version.id}
+                            className={"gl-comp-lib-version" + (version.active ? " is-active" : "")}
+                            data-profile-id={version.profile?.profileId}
+                          >
+                            <div className="gl-comp-lib-text">
+                              <span className="gl-comp-lib-version-name">{t("Version {version}", { version: version.version })}</span>
+                              <span className="gl-comp-lib-meta">{versionText(version)}</span>
+                            </div>
+                            {version.active && <span className="gl-comp-lib-active">{t("Active")}</span>}
+                            <MenuButton
+                              label={t("{name}: version actions", { name: labelled(version).name })}
+                              items={versionMenuFor(version)}
+                              icon={<MoreIcon size={16} />}
+                              className="gl-comp-lib-menu"
+                            />
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                  </>
+                );
+              })()}
             </li>
           ))}
         </ul>
@@ -306,6 +431,37 @@ export function CompensationMatrices({
             </div>
           </div>
         </div>
+      )}
+      {deletingVersion && onDeleteVersion && (
+        <div className="gl-modal-backdrop" onKeyDown={(event) => { if (event.key === "Escape") setDeletingVersion(null); }}>
+          <div className="gl-modal gl-comp-lib-dialog" role="dialog" aria-modal="true" aria-labelledby="comp-version-delete-title">
+            <div className="gl-modal-title" id="comp-version-delete-title">
+              {t("Delete {name}?", { name: matrixLabel(labelled(deletingVersion)) })}
+            </div>
+            <p>{t("It leaves the list of versions. No file is compensated with it, and no other version was edited from it.")}</p>
+            <div className="gl-modal-actions">
+              <button type="button" className="gl-btn-ghost" autoFocus onClick={() => setDeletingVersion(null)}>{t("Cancel")}</button>
+              <button
+                type="button"
+                className="gl-btn gl-btn-danger"
+                onClick={() => { onDeleteVersion(deletingVersion); setDeletingVersion(null); }}
+              >
+                {t("Delete")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {calculating && controls && (
+        <CompensationControlsDialog
+          workspaceFiles={controls.files}
+          takenNames={new Set(rows.map(({ name }) => name))}
+          onAdd={controls.onAdd}
+          onClose={(text) => {
+            setCalculating(false);
+            if (text !== undefined) setMessage({ text, error: false });
+          }}
+        />
       )}
       {exporting && (
         <CompensationMatrixExportDialog

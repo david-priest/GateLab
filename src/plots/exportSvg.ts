@@ -231,6 +231,7 @@ export async function pdfVectorPage(pdf: jsPDF, root: SVGSVGElement, size: { wid
   pdfTextInSvg(root);
   // The PDF writer misreads a PNG of 16 bits a sample and draws it as stripes.
   await eightBitPngImages(root);
+  const restoreImages = await largeImagesByObjectUrl(root);
   const holder = document.createElement("div");
   holder.style.cssText = "position:fixed;left:-100000px;top:0;visibility:hidden";
   holder.appendChild(root);
@@ -240,10 +241,61 @@ export async function pdfVectorPage(pdf: jsPDF, root: SVGSVGElement, size: { wid
     return true;
   } catch (error) {
     console.warn("GateLab: the PDF writer could not take this page as vector art; it is drawn as an image instead.", error);
+    restartPdfPage(pdf);
     return false;
   } finally {
+    restoreImages();
     holder.remove();
   }
+}
+
+/**
+ * The PDF's last page, the one being written, made blank again after the writer stopped part-way.
+ * The writer leaves the document in its own coordinate mode, where y runs up the page, and leaves
+ * what it had drawn on the page with its graphics state open: the image a caller then draws the
+ * page as came out small and mirrored over that art, and the next page mirrored with it. The mode
+ * is set back and the page replaced with an empty one of its size.
+ */
+export function restartPdfPage(pdf: jsPDF): void {
+  if (pdf.isAdvancedAPI()) pdf.compatAPI();
+  const page = pdf.getNumberOfPages();
+  const width = pdf.internal.pageSize.getWidth(), height = pdf.internal.pageSize.getHeight();
+  pdf.addPage([width, height], width >= height ? "landscape" : "portrait");
+  pdf.deletePage(page);
+}
+
+/** A data URI longer than this, in characters, is handed to the PDF writer as an object URL. */
+const PDF_WRITER_DATA_URI_LIMIT = 500_000;
+
+/**
+ * The SVG's large PNG and JPEG images given to the PDF writer by object URL in place of their
+ * data URIs. The writer reads a data URI with a regular expression that runs out of stack on one
+ * of about ten megabytes, an events image at print resolution say, and then cannot take the page
+ * as vector art; an object URL it fetches. The URL ends in the image's type, where the writer
+ * reads the type from. Returns the call that puts the data URIs back, for a caller that draws the
+ * SVG as an image afterwards, and lets the object URLs go.
+ */
+export async function largeImagesByObjectUrl(root: Element, limit = PDF_WRITER_DATA_URI_LIMIT): Promise<() => void> {
+  const swapped: { image: Element; attribute: string; uri: string; url: string }[] = [];
+  for (const image of Array.from(root.querySelectorAll("image"))) {
+    const attribute = image.hasAttribute("href") ? "href" : "xlink:href";
+    const uri = image.getAttribute(attribute) ?? image.getAttributeNS(XLINK_NS, "href") ?? "";
+    const type = /^data:image\/(png|jpeg);base64,/.exec(uri.slice(0, 32))?.[1];
+    if (!type || uri.length <= limit) continue;
+    try {
+      const url = URL.createObjectURL(await (await fetch(uri)).blob());
+      image.setAttribute(attribute, `${url}#.${type}`);
+      swapped.push({ image, attribute, uri, url });
+    } catch {
+      // An image that cannot be read this way is left for the writer, as before.
+    }
+  }
+  return () => {
+    for (const { image, attribute, uri, url } of swapped) {
+      image.setAttribute(attribute, uri);
+      URL.revokeObjectURL(url);
+    }
+  };
 }
 
 const PNG_DATA = "data:image/png;base64,";

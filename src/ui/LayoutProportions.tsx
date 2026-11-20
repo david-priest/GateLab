@@ -21,7 +21,7 @@ import type { CoreState } from "../store";
 import { buildCellValuesModel, type CellValuesModel, type CellValuesOptions, type CellViolin } from "../engine/cellValuesModel";
 import { PROPORTIONS_NO_FACTOR } from "../engine/proportionsSettings";
 import { proportionPanelLayout, proportionsFactorTitle } from "./PlottingTab";
-import { arrangeCellPanels, cellChartAxis, cellChartLayout, cellPanelAxes, cellPanels, cellPlotType, cellReplicateFrame, cellSlotN, channelCellPanels, splitsViolins, type CellChannelPart, type CellPanel } from "./CellValuesChart";
+import { arrangeCellPanels, cellChartAxis, cellChartLayout, cellPanelAxes, cellPanels, cellPlotType, cellReplicateFrame, cellSlotN, channelCellPanels, splitsViolins, UNLABELLED_RIDGE_LEFT, type CellChannelPart, type CellPanel } from "./CellValuesChart";
 import { type ChartAxisFrame } from "./chart/valueAxis";
 import { chartXAxis } from "./chart/chartXAxis";
 import { arrangedSize, arrangePanels, chartChannels, chartPageDimension, chartPanelDimensions, isPageSelector, onlyPanelText, pagePanels, panelDimensionText, selectorPage } from "./panelArrangement";
@@ -30,12 +30,14 @@ import { arrangeStatisticPanels, statisticChannelsFrame, statisticChartFrame, ty
 import { plottingDivisionLevels, plottingFacetLevels, plottingFactorLevels, plottingGroupLevels } from "./plottingColours";
 import { useI18n } from "./i18n";
 import { useFigureStyle } from "./figureStyle";
+import { inlineZoom, settleNaturalSize, type NaturalSize } from "./layout/naturalSize";
 import { CHART_LEGEND_GAP, chartLegendColumns, chartLegendHeight, chartLegendWidth } from "./chart/ChartLegend";
 import { nLineHeight, withNRows } from "./chart/chartLayout";
 import { nLines, nRowSize } from "./chart/chartN";
 import { formatLinearTick } from "./chart/chartFormat";
 import { comparisonPaired, comparisonSpace, withBracketRows } from "./chart/chartComparisons";
 import { proportionPanelTests } from "./ProportionsChart";
+import { PlottingHeatmap } from "./PlottingHeatmap";
 import { cellAxisOptions, PlottingChartView } from "./chart/PlottingChartView";
 
 /** The proportion model while a block draws cells: nothing is counted for a chart not shown. */
@@ -188,8 +190,11 @@ export function cellValuesBlockFrame(
   const titles = { group: settings.xAxis === "populations" ? proportionsFactorTitle(settings.groupSel) : undefined, facet: proportionsFactorTitle(settings.facetSel) };
   const keys = parts?.map((part) => part.key);
   const shown = pagePanels(panels, chartPageDimension({ ...settings, channels: keys ?? [] }, model.hasFacet), selectorPage(only), (p) => p);
-  const placed = arrangedSize(arrangeCellPanels(shown, xAxis, model.hasFacet, settings, titles, keys), panel.width, panel.height, settings.fontAxis);
-  const width = Math.max(360, legend.width, placed.width) + 24;
+  const arranged = arrangeCellPanels(shown, xAxis, model.hasFacet, settings, titles, keys);
+  const placed = arrangedSize(arranged, panel.width, panel.height, settings.fontAxis);
+  // Ridgelines labelled beside the first panel of each row only: the panels further along are narrower.
+  const unlabelled = plotType === "ridgeline" && settings.ridgeline?.labels === "first" ? (arranged.columns - 1) * (panel.margin.left - UNLABELLED_RIDGE_LEFT) : 0;
+  const width = Math.max(360, legend.width, placed.width - unlabelled) + 24;
   const height = placed.height + (settings.legend ? legend.height : 0) + 24;
   return { width: Math.round(Math.min(width, box.width)), height: Math.round(Math.min(height, box.height)) };
 }
@@ -496,7 +501,62 @@ export function blockChannelParts(
   });
 }
 
-export function LayoutProportionsSurface({
+type LayoutProportionsSurfaceProps = Parameters<typeof LayoutChartSurface>[0];
+
+/** A Plotting chart's block on a sheet: a summary heatmap, or any other chart kind. */
+export function LayoutProportionsSurface(props: LayoutProportionsSurfaceProps) {
+  return props.recipe.settings.valueKind === "heatmap" ? <LayoutHeatmapSurface {...props} /> : <LayoutChartSurface {...props} />;
+}
+
+/**
+ * A summary heatmap's block: the heatmap the Plotting tab draws, at its own size, zoomed down to
+ * the frame and never enlarged, as a chart's block is.
+ */
+function LayoutHeatmapSurface({ recipe, samples, state, metadataById, width, height, containerId, dataRevision = "", metadataLevels, sheetStyle }: LayoutProportionsSurfaceProps) {
+  const { style: figureStyle } = useFigureStyle();
+  const settings = recipe.settings;
+  const fonts = recipe.textSize === "sheet" && sheetStyle
+    ? { fontTick: sheetStyle.fontTick, fontAxis: sheetStyle.fontAxis }
+    : settings.followFigureStyle
+      ? { fontTick: figureStyle.fontTick, fontAxis: figureStyle.fontAxis }
+      : { fontTick: settings.fontTick, fontAxis: settings.fontAxis };
+  const zoomRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  useLayoutEffect(() => {
+    const node = zoomRef.current;
+    if (!node) return;
+    const measure = () => {
+      const natural = node.firstElementChild as HTMLElement | null;
+      if (!natural) return;
+      const w = natural.offsetWidth;
+      const h = natural.offsetHeight;
+      if (w && h) setZoom(Math.min(1, width / w, height / h));
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [width, height]);
+  return (
+    <div className="gl-layout-plot-host gl-layout-proportions-host" style={{ width, height }}>
+      <div ref={zoomRef} className="gl-layout-figure-zoom" style={{ zoom, width: "max-content" }}>
+        <PlottingHeatmap
+          settings={settings}
+          samples={samples}
+          state={state}
+          metadata={metadataById}
+          columnLevels={metadataLevels}
+          dataRevisionKey={String(dataRevision)}
+          fonts={fonts}
+          containerId={containerId}
+        />
+      </div>
+    </div>
+  );
+}
+
+function LayoutChartSurface({
   recipe,
   samples,
   state,
@@ -606,23 +666,30 @@ export function LayoutProportionsSurface({
   const fonts = { tick: drawn.fontTick, axis: drawn.fontAxis, legend: drawn.fontLegend, ...(sheetText ? { title: sheetText.fontTitle } : {}) };
   const formatTick = sheetText ? formatLinearTick : undefined;
   // Otherwise the chart is laid out at its natural size and zoomed to fit the frame, never
-  // enlarged. A chart laid out to the frame is measured too, to mark one that does not fit.
+  // enlarged. A chart laid out to the frame is measured too: one that does not fit is zoomed down
+  // to the frame in the same way and marked, so it is never cut.
   const zoomRef = useRef<HTMLDivElement>(null);
   const [zoom, setZoom] = useState(1);
   const [overflows, setOverflows] = useState(false);
+  const naturalRef = useRef<NaturalSize | null>(null);
   useLayoutEffect(() => {
     const node = zoomRef.current;
     if (!node) return;
     const measure = () => {
       const natural = node.firstElementChild as HTMLElement | null;
       if (!natural) return;
-      const w = natural.offsetWidth;
-      const h = natural.offsetHeight;
-      if (!w || !h) return;
+      if (!natural.offsetWidth || !natural.offsetHeight) return;
+      // Not taken when only the zoom's rounding moved it, or the chart flickers (naturalSize.ts).
+      const size = settleNaturalSize(naturalRef.current, { width: natural.offsetWidth, height: natural.offsetHeight, zoom: inlineZoom(node) });
+      naturalRef.current = size;
+      const w = size.width;
+      const h = size.height;
       if (sheetText) {
-        setZoom(1);
-        // The host's 4 px padding a side.
-        setOverflows(w > width - 8 + 1 || h > height - 8 + 1);
+        // The host's 4 px padding a side. The size measured is the chart's own, unzoomed, so
+        // zooming it does not change what is measured.
+        const over = w > width - 8 + 1 || h > height - 8 + 1;
+        setZoom(over ? Math.min(1, (width - 8) / w, (height - 8) / h) : 1);
+        setOverflows(over);
       } else {
         setZoom(Math.min(1, width / w, height / h));
         setOverflows(false);
@@ -634,9 +701,9 @@ export function LayoutProportionsSurface({
     observer.observe(node);
     return () => observer.disconnect();
   }, [width, height, model, cellModel, sheetText, drawn]);
-  // A frame too small for the chart at the sheet's text sizes clips it and says so in its corner.
+  // A frame too small for the chart at the sheet's text sizes draws it smaller and says so in its corner.
   const tooSmall = sheetText && (fitted?.fits === false || overflows) ? (
-    <span className="gl-layout-too-small" title={t("The frame is too small for this chart at the sheet's text sizes; enlarge it to show the whole chart.")}>
+    <span className="gl-layout-too-small" title={t("The frame is too small for this chart at the sheet's text sizes, so it is drawn smaller; enlarge the frame for full-size text.")}>
       {t("too small")}
     </span>
   ) : null;

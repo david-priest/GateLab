@@ -6,7 +6,7 @@
 // (new_gate/gate_edit/…) are delivered through the shim to typed callbacks.
 
 import { useEffect, useRef, type CSSProperties, type MutableRefObject } from "react";
-import { loadPlots, type CytofD3Api } from "./loadPlots";
+import { loadPlotInstance, loadPlots, plotContainerId, type CytofD3Api } from "./loadPlots";
 import { isNativeTextEditingTarget } from "../ui/historyShortcuts";
 
 /** Commands App can send the renderer once it has loaded. */
@@ -46,6 +46,18 @@ export interface NewGate {
 interface Props {
   payload?: object | null;
   mode?: string;
+  /**
+   * Which of the Gating tab's plots this is, when it shows several: each has an engine of its own
+   * (loadPlotInstance) and a container of its own. 0, the default, is the one plot there has
+   * always been.
+   */
+  instance?: number;
+  /** A plot that is looked at and not worked on: it takes no keys. Its events go nowhere unless handlers are given. */
+  passive?: boolean;
+  /** Laid out again at any change of the area's width, not only past 30 px, so plots in cells of one size are one size (patchExactPlotSize). */
+  exactSize?: boolean;
+  /** The plot's side set by its resize grip, in px; null fits it to the area (patchPlotSide). */
+  plotSide?: number | null;
   /** Filled once the renderer is loaded, so App can drive commands that live in the renderer. */
   actions?: MutableRefObject<GatingPlotActions | null>;
   visible?: boolean;
@@ -167,6 +179,10 @@ let _seq = 1000;
 export function GatingPlot({
   payload,
   mode = "navigate",
+  instance = 0,
+  passive = false,
+  exactSize = false,
+  plotSide = null,
   visible = true,
   hidden = false,
   interactionToken,
@@ -338,7 +354,7 @@ export function GatingPlot({
   // Mount once: load the engine, wire plot → app inputs, observe container size.
   useEffect(() => {
     mountedRef.current = true;
-    const { CytofD3, bus } = loadPlots();
+    const { CytofD3, bus } = instance === 0 ? loadPlots() : loadPlotInstance(instance);
     apiRef.current = CytofD3;
     if (actions) actions.current = {
       extendSelectedGateToEdges: (gateId) => apiRef.current?.extendSelectedGateToEdges?.(gateId) ?? false,
@@ -504,7 +520,7 @@ export function GatingPlot({
   // takes back a drawn polygon's last vertex. The listener captures, so a key spent here never
   // reaches the Gating tab's Delete for the selected gate.
   useEffect(() => {
-    if (visible === false) return;
+    if (visible === false || passive) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
       if (isNativeTextEditingTarget(event.target) || document.querySelector(".gl-modal-backdrop")) return;
@@ -526,7 +542,13 @@ export function GatingPlot({
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [visible]);
+  }, [visible, passive]);
+
+  // A side set by the grip is read by the engine from the container; drawn again when it changes.
+  useEffect(() => {
+    schedulePaint();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plotSide]);
 
   // Interaction-mode changes (navigate ↔ draw-rect/poly/quadrant) are light: just
   // flip the engine's mode, no re-decode of the point cloud.
@@ -542,5 +564,5 @@ export function GatingPlot({
   } as CSSProperties;
   styleRef.current = { ...(fontStyle as Record<string, string>), ...(hidden ? { display: "none" } : {}) };
 
-  return <div id="cytof-plot-container" ref={containerRef} className="gl-plot" style={hidden ? { ...fontStyle, display: "none" } : fontStyle} />;
+  return <div id={instance === 0 ? "cytof-plot-container" : plotContainerId(instance)} ref={containerRef} className="gl-plot" data-exact-size={exactSize ? "" : undefined} data-plot-side={plotSide ?? undefined} style={hidden ? { ...fontStyle, display: "none" } : fontStyle} />;
 }
