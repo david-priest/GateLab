@@ -145,6 +145,22 @@ describe("Plotting tab controls", () => {
     expect(readPersistedTabValues("prop.height")["prop.height"]).toBe(360);
   });
 
+  it("shows Typography last under Style, as the Illustration tab does: the follow switch, then the sizes, with no dialog", () => {
+    render(fixture());
+    act(() => button("Style").click());
+    const style = host.querySelector<HTMLElement>(".gl-prop-section-appearance")!;
+    expect([...style.querySelectorAll("h3")].map((h) => h.textContent)).toEqual(["Colours", "Size", "Display", "Value axis", "Typography"]);
+    expect(button("Edit figure style")).toBeUndefined();
+    const group = style.querySelector<HTMLElement>(".gl-figure-typography")!;
+    const labels = () => [...group.querySelectorAll("label")].map((label) => label.textContent?.trim());
+    // A new chart follows the workspace style: its sizes in pt, in the pane.
+    expect(labels()).toEqual(["Use the workspace figure style", "Tick", "Axis", "Legend"]);
+    expect(group.querySelector<HTMLInputElement>('input[aria-label="Tick"]')!.value).toBe("6.75");
+    act(() => checkbox("Use the workspace figure style").click());
+    expect(readPersistedTabValues("prop.followFigureStyle")["prop.followFigureStyle"]).toBe(false);
+    expect(group.querySelector<HTMLInputElement>('input[aria-label="Tick"]')!.value).toBe("9");
+  });
+
   it("offers each control only in the chart type it changes", () => {
     const fx = fixture();
     render(fx);

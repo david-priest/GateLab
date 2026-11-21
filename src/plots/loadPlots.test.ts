@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import cytofSrc from "../../vendor/GateLabR/inst/app/www/cytof_plot.js?raw";
 import miniSrc from "../../vendor/GateLabR/inst/app/www/mini_plot.js?raw";
-import { ELLIPSE_PIXEL_GEOMETRY_SRC, patchControlUnderlay, patchCytofForGateLab, patchMiniPlot, patchExactPlotSize, patchNoOuterTicks, patchPlotSide, patchOverlayDrawOrder, patchPlotWidthFloor, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
+import { AVAILABLE_WIDTH_SRC, ELLIPSE_PIXEL_GEOMETRY_SRC, patchAvailableWidth, patchControlUnderlay, patchCytofForGateLab, patchMiniPlot, patchExactPlotSize, patchNoOuterTicks, patchPlotSide, patchOverlayDrawOrder, patchPlotWidthFloor, patchPointSizes, patchPolygonDraftKeys, patchTailoredGates } from "./loadPlots";
 
 describe("GateLab cytof plot width", () => {
   it("lets the plot shrink to 300 px so it fits a phone's width", () => {
@@ -14,6 +14,37 @@ describe("GateLab cytof plot width", () => {
     expect(patchPlotWidthFloor(patched)).toBe(patched);
     expect(patchCytofForGateLab(cytofSrc)).toContain("Math.max(300, _availW - 32)");
     warn.mockRestore();
+  });
+});
+
+describe("GateLab cytof available width", () => {
+  it("measures the area through _glAvailW in both places the plot reads its width", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const patched = patchAvailableWidth(cytofSrc);
+    expect(warn).not.toHaveBeenCalled();
+    expect(patched).toContain(`${AVAILABLE_WIDTH_SRC}    function _init() {`);
+    expect(patched).toContain("_availW = _glAvailW(_el);");
+    expect(patched).toContain("_chkW = _glAvailW(_chkEl);");
+    expect(patchAvailableWidth(patched)).toBe(patched);
+    expect(patchCytofForGateLab(cytofSrc)).toContain("_glAvailW(_chkEl)");
+    warn.mockRestore();
+  });
+
+  const availW = (width: number, padding: number) => {
+    const glAvailW = new Function("window", `${AVAILABLE_WIDTH_SRC}return _glAvailW;`)({
+      getComputedStyle: () => ({ paddingLeft: `${padding}px`, paddingRight: `${padding}px`, borderLeftWidth: "0px", borderRightWidth: "0px" }),
+    }) as (el: unknown) => number;
+    return glAvailW({ getBoundingClientRect: () => ({ width }), clientWidth: width });
+  };
+
+  it("keeps an unpadded area's and a 7 px padded grid cell's width", () => {
+    expect(availW(500, 0)).toBe(500);
+    expect(availW(484, 7)).toBe(484);
+  });
+
+  it("fits the plot card inside a 28 px padded area", () => {
+    // The card is the side (width - 32) plus its 18 px gutter: 534 px inside a 590 px area padded 28 px a side.
+    expect(availW(590, 28) - 32 + 18).toBe(590 - 56);
   });
 });
 

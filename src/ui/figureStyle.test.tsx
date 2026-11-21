@@ -20,7 +20,7 @@ import { defaultIllustrationConfig } from "../engine/figureDefaults";
 import type { IllustrationConfig } from "../engine/workspace";
 import { DEFAULT_GATE_LINE_WIDTH, GateInkContext, type GateInk } from "../plots/gateInk";
 import { I18nProvider } from "./i18n";
-import { FigureStyleFollow, FigureStyleProvider, ptFromPx, pxFromPt } from "./figureStyle";
+import { FigureStyleFollow, FigureStyleProvider, FigureTypography, ptFromPx, pxFromPt } from "./figureStyle";
 import { LayoutTab } from "./LayoutTab";
 import { PlottingTab } from "./PlottingTab";
 import { IllustrationTab } from "./IllustrationTab";
@@ -196,6 +196,33 @@ describe("The figure style editor", () => {
     expect(seen!.ink.lineWidth).toBe(DEFAULT_GATE_LINE_WIDTH);
     act(() => button("Close").click());
     expect(host.querySelector(".gl-figure-style-editor")).toBeNull();
+  });
+});
+
+describe("A tab's Typography", () => {
+  it("shows the text sizes in the pane, the style's in pt while the tab follows it and the tab's own in px otherwise, with no dialog", () => {
+    let seen: FigureStyle | null = null;
+    const own = vi.fn();
+    function Tab() {
+      const [following, setFollowing] = useState(true);
+      return <FigureTypography following={following} onFollow={setFollowing} sizes={[{ key: "fontTick", value: 10, min: 5, max: 20, onCommit: own }]} />;
+    }
+    act(() => root.render(<Workspace onStyle={(style) => { seen = style; }}><Tab /></Workspace>));
+    const group = () => host.querySelector(".gl-figure-typography")!;
+    const tick = () => group().querySelector<HTMLInputElement>('input[aria-label="Tick"]')!;
+    expect(group().querySelector("h3")!.textContent).toBe("Typography");
+    expect(group().closest("details")).toBeNull();
+    // Following: the style's 9 px tick is 6.75 pt, and a change is the style's, as the editor makes it.
+    expect(tick().value).toBe("6.75");
+    commit(tick(), "9");
+    expect(seen!.fontTick).toBe(12);
+    expect(host.querySelector(".gl-figure-style-editor")).toBeNull();
+    // Unticked: the tab's own size in px, and a change is the tab's alone.
+    act(() => group().querySelector<HTMLInputElement>('input[type="checkbox"]')!.click());
+    expect(tick().value).toBe("10");
+    commit(tick(), "14");
+    expect(own).toHaveBeenCalledWith(14);
+    expect(seen!.fontTick).toBe(12);
   });
 });
 

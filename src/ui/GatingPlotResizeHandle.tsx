@@ -89,7 +89,7 @@ export function GatingPlotResizeHandle({ corner, side, onCommit, onFit }: Gating
         />
       )}
       <div
-        className="gl-plot-resize"
+        className={shown ? "gl-plot-resize is-dragging" : "gl-plot-resize"}
         style={{ left: corner.left + grow, top: corner.top + grow }}
         role="separator"
         aria-label={t("Resize the plot")}

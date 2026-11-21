@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { CompanionPlotView } from "../plots/companionPlotPayload";
-import { MAX_GATING_PLOTS, ONE_GATING_PLOT, addGatingPlot, plotGridShape, removeGatingPlot, selectGatingPlot } from "./gatingPlotViews";
+import { MAX_GATING_PLOTS, MAX_GRID_PLOT_SIDE, ONE_GATING_PLOT, addGatingPlot, plotGridLayout, plotGridShape, removeGatingPlot, selectGatingPlot } from "./gatingPlotViews";
 
 const view = (populationId: string, xKey = "A", yKey = "B"): CompanionPlotView =>
   ({ populationId, selectedPopulationIds: [], xKey, yKey, histogram: false });
@@ -92,11 +92,26 @@ describe("how the plots share the area", () => {
     expect(plotGridShape(2, 500, 900)).toEqual({ columns: 1, rows: 2 });
   });
 
-  it("puts three and four two by two unless the area is a strip", () => {
+  it("puts three and four two by two, whatever the area's shape", () => {
     expect(plotGridShape(3, 800, 700)).toEqual({ columns: 2, rows: 2 });
     expect(plotGridShape(4, 800, 700)).toEqual({ columns: 2, rows: 2 });
-    expect(plotGridShape(4, 1800, 400)).toEqual({ columns: 4, rows: 1 });
-    expect(plotGridShape(3, 1500, 420)).toEqual({ columns: 3, rows: 1 });
+    expect(plotGridShape(4, 1800, 400)).toEqual({ columns: 2, rows: 2 });
+    expect(plotGridShape(3, 1500, 420)).toEqual({ columns: 2, rows: 2 });
+  });
+
+  it("makes no cell larger than the largest plot the engine draws", () => {
+    // A wide, tall area: fitted, two cells would be 830 px, with each plot 630 px in a corner.
+    expect(plotGridLayout(2, 1788, 830, 10, null)).toEqual({ columns: 2, side: MAX_GRID_PLOT_SIDE + 32 });
+    expect(plotGridLayout(2, 778, 700, 10, null)).toEqual({ columns: 2, side: 384 });
+  });
+
+  it("wraps plots set larger by the grip onto more rows when they no longer fit across", () => {
+    expect(plotGridLayout(2, 1000, 700, 10, 400)).toEqual({ columns: 2, side: 432 });
+    expect(plotGridLayout(2, 800, 700, 10, 400)).toEqual({ columns: 1, side: 432 });
+    expect(plotGridLayout(4, 1000, 700, 10, 600)).toEqual({ columns: 1, side: 632 });
+    expect(plotGridLayout(4, 1400, 700, 10, 600)).toEqual({ columns: 2, side: 632 });
+    // Never larger than the engine draws.
+    expect(plotGridLayout(2, 3000, 2000, 10, 900).side).toBe(MAX_GRID_PLOT_SIDE + 32);
   });
 
   it("gives one plot the whole area", () => {

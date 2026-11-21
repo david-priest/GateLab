@@ -173,7 +173,9 @@
    Only while it is shown: an id outranks `section[hidden]` below, and without the :not() the
    Data section stayed on screen above every other tab's controls. */
 .gl-figure-fields > #figure-section-data:not([hidden]) { flex: 1 0 auto; display: flex; flex-direction: column; }
-#figure-section-data .gl-figure-list-populations { flex: 1 1 0; min-height: 160px; max-height: none; }
+/* The Data tab's population list is as tall as its rows; the pane scrolls, not the list (David,
+   2026-11-20: the list "does not need to have a set pane height. It's too short"). */
+#figure-section-data .gl-figure-populations .gl-strategy-pops-body { max-height: none; overflow: visible; }
 .gl-figure-fields section[hidden] {
   display: none;
 }
@@ -320,6 +322,42 @@
   padding: 4px 0;
   font-size: var(--gl-font-size-caption);
   background: none;
+}
+/* The fields the Illustration and Plotting side panes share (figureStyle.tsx: the Typography
+   section and a figure-style field) and the plot's channel pickers sit on the inspector's row,
+   label at the left and the box beside it, rather than the app's smaller muted field or a picker
+   wrapped onto a line of its own. Typography is a section like the others, titled as they are. */
+.gl-figure-fields .gl-field-inline,
+.gl-figure-fields .gl-check {
+  font-size: inherit;
+  color: inherit;
+  gap: 7px;
+}
+.gl-figure-fields label > .gl-searchable-select-field {
+  flex: 1 1 130px;
+  width: 130px;
+}
+/* A field's label in a column of its own width (--gl-side-field-label, styles.css), so the boxes
+   of the fields below one another line up, as they do on the Plotting tab; a unit or a value
+   after the box takes the room it needs. */
+.gl-figure-fields label:has(> select, > input:not([type="checkbox"]):not([type="radio"]), > .gl-searchable-select) {
+  display: grid;
+  grid-template-columns: var(--gl-side-field-label, 108px) minmax(0, 1fr);
+  grid-auto-flow: column;
+  grid-auto-columns: max-content;
+  column-gap: 7px;
+}
+.gl-figure-fields label:has(> select, > input:not([type="checkbox"]):not([type="radio"]), > .gl-searchable-select) > :is(select, input, .gl-searchable-select) {
+  width: 100%;
+}
+.gl-figure-fields .gl-figure-typography > h3 {
+  margin-top: var(--gl-space-4);
+}
+/* The population list's buttons at the size of the file list's, as on the Plotting tab, rather
+   than the workspace's full-size buttons. */
+.gl-figure-fields .gl-strategy-pops-actions button {
+  padding: 3px 7px;
+  font-size: var(--gl-font-size-caption);
 }
 .gl-figure-shelf {
   padding: 9px;

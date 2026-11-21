@@ -87,12 +87,13 @@ export interface PlotGridShape {
 }
 
 /**
- * How `count` square plots share an area: the arrangement with the largest cells. A wide area
- * puts two plots side by side and a tall one stacks them; four are two by two unless the area is
- * a strip.
+ * How `count` square plots share an area. Two take the arrangement with the larger cells: side by
+ * side in a wide area, stacked in a tall one. Three and four are always two by two (David,
+ * 2026-11-21).
  */
 export function plotGridShape(count: number, width: number, height: number): PlotGridShape {
   const n = Math.max(1, Math.min(MAX_GATING_PLOTS, Math.floor(count)));
+  if (n >= 3) return { columns: 2, rows: 2 };
   let best: PlotGridShape = { columns: n, rows: 1 };
   let bestSide = -1;
   for (let columns = n; columns >= 1; columns--) {
@@ -105,4 +106,31 @@ export function plotGridShape(count: number, width: number, height: number): Plo
     }
   }
   return best;
+}
+
+/** The largest side the plot engine draws a plot at in a grid cell (loadPlots: PLOT_W's 630 px cap). */
+export const MAX_GRID_PLOT_SIDE = 630;
+/** A cell is 32 px larger than the plot drawn in it: the engine's Y-title gutter and the cell's padding. */
+const CELL_MARGIN = 32;
+
+/**
+ * The grid's columns and its cells' side, in px, for `count` plots in an area `width` x `height`
+ * with `gap` between cells. Fitted to the area, a cell is never larger than the largest plot the
+ * engine draws: a larger cell left each plot in its top-left corner with a wide gap beside it (David,
+ * 2026-11-21). A side set by the grip makes every cell that size, and the plots wrap onto more rows
+ * when that many columns no longer fit across.
+ */
+export function plotGridLayout(count: number, width: number, height: number, gap: number, setSide: number | null): { columns: number; side: number } {
+  const shape = plotGridShape(count, width, height);
+  if (setSide) {
+    const side = Math.min(setSide, MAX_GRID_PLOT_SIDE) + CELL_MARGIN;
+    const fit = Math.max(1, Math.floor((width + gap) / (side + gap)));
+    return { columns: Math.min(shape.columns, fit), side };
+  }
+  // Never under the engine's smallest plot and its margin; a smaller area scrolls.
+  const fitted = Math.floor(Math.min(
+    (width - (shape.columns - 1) * gap) / shape.columns,
+    (height - (shape.rows - 1) * gap) / shape.rows,
+  ));
+  return { columns: shape.columns, side: Math.min(MAX_GRID_PLOT_SIDE + CELL_MARGIN, Math.max(336, fitted)) };
 }
