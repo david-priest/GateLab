@@ -1799,12 +1799,47 @@ ${badgeNeedle}`;
     "                            var e = a[1][a[1].length - 1];\n" +
     "                            a[0].attr('d', _armPath([[ncxp, ncyp], e]));\n" +
     "                        });\n" +
+    "                        // A handle pinned to the frame sits where its arm crosses it, which moves with\n" +
+    "                        // the centre: it follows during the drag, not only on release (David, 2026-11-21).\n" +
+    "                        var _endOf = { right: _ce[0], up: _ce[1], left: _ce[2], down: _ce[3] };\n" +
+    "                        armHandleSel.forEach(function (c) {\n" +
+    "                            var e = _endOf[c.attr('data-arm')];\n" +
+    "                            if (c.attr('data-pinned') !== '1' || !e) return;\n" +
+    "                            var t = 1;\n" +
+    "                            if (e[0] < 0) t = Math.min(t, ncxp / (ncxp - e[0]));\n" +
+    "                            if (e[0] > W) t = Math.min(t, (W - ncxp) / (e[0] - ncxp));\n" +
+    "                            if (e[1] < 0) t = Math.min(t, ncyp / (ncyp - e[1]));\n" +
+    "                            if (e[1] > H) t = Math.min(t, (H - ncyp) / (e[1] - ncyp));\n" +
+    "                            t = Math.max(0, Math.min(1, t));\n" +
+    "                            c.attr('cx', Math.max(0, Math.min(W, ncxp + (e[0] - ncxp) * t)))\n" +
+    "                                .attr('cy', Math.max(0, Math.min(H, ncyp + (e[1] - ncyp) * t)));\n" +
+    "                        });\n" +
     "                    } else if (arms) {\n" +
     "                        vline.attr('y1', ncyp); hline.attr('x2', ncxp);\n" +
-    "                        var tr = 'translate(' + (ncxp - cxp) + ',' + (ncyp - cyp) + ')';\n" +
-    "                        if (armH) armH.attr('transform', tr);\n" +
-    "                        if (armV) armV.attr('transform', tr);\n" +
-    "                        armHandleSel.forEach(function (c) { c.attr('transform', tr); });\n" +
+    "                        // A bent arm runs from the centre to the plot's edge. It moves with the centre\n" +
+    "                        // across its length and is stretched along it, so its end stays on the edge\n" +
+    "                        // during the drag rather than falling short of it or running past (David,\n" +
+    "                        // 2026-11-21); the redraw on release gives its exact shape.\n" +
+    "                        var _follow = function (pxs) {\n" +
+    "                            var e = pxs[pxs.length - 1];\n" +
+    "                            var alongX = Math.abs(e[0] - cxp) >= Math.abs(e[1] - cyp);\n" +
+    "                            var sx = alongX && Math.abs(e[0] - cxp) > 1 ? (e[0] - ncxp) / (e[0] - cxp) : 1;\n" +
+    "                            var sy = !alongX && Math.abs(e[1] - cyp) > 1 ? (e[1] - ncyp) / (e[1] - cyp) : 1;\n" +
+    "                            return function (q) {\n" +
+    "                                return alongX ? [ncxp + (q[0] - cxp) * sx, q[1] + (ncyp - cyp)]\n" +
+    "                                    : [q[0] + (ncxp - cxp), ncyp + (q[1] - cyp) * sy];\n" +
+    "                            };\n" +
+    "                        };\n" +
+    "                        var _fh = armHpx ? _follow(armHpx) : null, _fv = armVpx ? _follow(armVpx) : null;\n" +
+    "                        if (armH && _fh) armH.attr('d', _armPath(armHpx.map(_fh)));\n" +
+    "                        if (armV && _fv) armV.attr('d', _armPath(armVpx.map(_fv)));\n" +
+    "                        armHandleSel.forEach(function (c) {\n" +
+    "                            var f = c.attr('data-arm') === 'v' ? _fv : _fh;\n" +
+    "                            var at = [Number(c.attr('data-x')), Number(c.attr('data-y'))];\n" +
+    "                            if (!f || !isFinite(at[0]) || !isFinite(at[1])) return;\n" +
+    "                            var q = f(at);\n" +
+    "                            c.attr('transform', 'translate(' + (q[0] - at[0]) + ',' + (q[1] - at[1]) + ')');\n" +
+    "                        });\n" +
     "                    }";
   const curlyHandleNeedle =
     "            handle.call(drag);\n" +
@@ -1824,6 +1859,7 @@ ${badgeNeedle}`;
     "                    var alongX = (which === 'h') !== isFlipped;\n" +
     "                    var hx = end[0], hy = end[1];\n" +
     "                    var h = gg.append('circle').attr('class', 'vh')\n" +
+    "                        .attr('data-arm', which).attr('data-x', hx).attr('data-y', hy)\n" +
     "                        .attr('cx', hx).attr('cy', hy).attr('r', VRAD)\n" +
     "                        .attr('fill', 'white').attr('stroke', color).attr('stroke-width', 2)\n" +
     "                        .style('cursor', alongX ? 'ns-resize' : 'ew-resize').style('pointer-events', 'all');\n" +

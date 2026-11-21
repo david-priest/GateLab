@@ -964,6 +964,12 @@ describe("GateLab spider quadrants in the renderers", () => {
     ]) expect(cytof).toContain(piece);
     expect(mini).toContain("qSpider");
     expect(mini).toContain("quadrant_anchors");
+    // While the centre is dragged, a pinned handle follows its arm's crossing of the frame, and a
+    // bent arm is stretched so its end stays on the plot's edge (2026-11-21).
+    expect(cytof).toContain("c.attr('data-pinned') !== '1'");
+    expect(cytof).toContain("if (armH && _fh) armH.attr('d', _armPath(armHpx.map(_fh)));");
+    expect(cytof).toContain(".attr('data-arm', which).attr('data-x', hx).attr('data-y', hy)");
+    expect(cytof).not.toContain("if (armH) armH.attr('transform', tr);");
     expect(() => new Function(cytof)).not.toThrow();
     expect(() => new Function(mini)).not.toThrow();
     warn.mockRestore();
