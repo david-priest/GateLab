@@ -24,7 +24,7 @@ import { heatmapDataTable } from "./plottingHeatmapModel";
 import type { HeatmapMatrix } from "../engine/figureHeatmap";
 import { NumberField } from "./NumberField";
 import { ChartResizeHandle, type ChartSize } from "./chart/ChartResizeHandle";
-import { FigureStyleFollow, useFigureStyle } from "./figureStyle";
+import { FigureTypography, useFigureStyle } from "./figureStyle";
 import { figureHierarchies } from "../engine/figure";
 import {
   buildProportionsModel,
@@ -935,7 +935,7 @@ export function PlottingTab({
             aria-labelledby="prop-plot-heading"
           >
             <span id="prop-plot-heading" className="gl-control-section-label">
-              {t("Plot")}
+              {t("Chart")}
             </span>
             <div className="gl-control-section-body">
               <label className="gl-check" title={t("Each population's share of its parent, per file or replicate unit")}>
@@ -974,7 +974,7 @@ export function PlottingTab({
                 />
                 {t("Summary heatmap (populations × channels)")}
               </label>
-              <span className="gl-ctl-sep" />
+              {!heatmap && <h3>{t("Plot type")}</h3>}
               {!heatmap && PLOT_TYPES_BY_VALUE[valueKind].map((type) => (
                 <label key={type} className="gl-check" title={plotTypeHint(type)}>
                   <input
@@ -1248,7 +1248,7 @@ export function PlottingTab({
             className="gl-control-section gl-control-section-wide gl-prop-section-arrange"
             aria-labelledby="prop-arrange-heading"
           >
-            <span id="prop-arrange-heading" className="gl-control-section-label">
+            <span id="prop-arrange-heading" className="gl-control-section-label gl-sr-only">
               {t("Arrange")}
             </span>
             <div className="gl-control-section-body">
@@ -1289,13 +1289,14 @@ export function PlottingTab({
           >
             <span
               id="prop-appearance-heading"
-              className="gl-control-section-label"
+              className="gl-control-section-label gl-sr-only"
             >
               {t("Appearance")}
             </span>
             <div className="gl-control-section-body">
               {heatmap ? (
                 <>
+                  <h3>{t("Colours")}</h3>
                   <label className="gl-field-inline">
                     {t("Palette")}
                     <select aria-label={t("Heatmap palette")} value={heatmapPalette} onChange={(e) => setHeatmapPalette(e.target.value as ProportionsSettings["heatmapPalette"])}>
@@ -1305,6 +1306,7 @@ export function PlottingTab({
                       <option value="heat">{t("Heat")}</option>
                     </select>
                   </label>
+                  <h3>{t("Summary heatmap")}</h3>
                   <label className="gl-field-inline">
                     {t("Cell size")}
                     <NumberField aria-label={t("Heatmap cell size")} value={heatmapCellSize} min={12} max={120} integer onCommit={setHeatmapCellSize} />
@@ -1314,22 +1316,17 @@ export function PlottingTab({
                     <input type="checkbox" checked={heatmapShowValues} onChange={(e) => setHeatmapShowValues(e.target.checked)} />
                     {t("Show values")}
                   </label>
-                  <span className="gl-ctl-sep" />
-                  <FigureStyleFollow following={followFigureStyle} onFollow={setFollowFigureStyle} />
-                  {!followFigureStyle && (
-                    <>
-                      <label className="gl-field-inline">
-                        {t("Tick")}
-                        <NumberField value={fontTick} min={5} max={20} integer onCommit={setFontTick} />
-                      </label>
-                      <label className="gl-field-inline">
-                        {t("Axis")}
-                        <NumberField value={fontAxis} min={5} max={24} integer onCommit={setFontAxis} />
-                      </label>
-                    </>
-                  )}
+                  <FigureTypography
+                    following={followFigureStyle}
+                    onFollow={setFollowFigureStyle}
+                    sizes={[
+                      { key: "fontTick", value: fontTick, min: 5, max: 20, onCommit: setFontTick },
+                      { key: "fontAxis", value: fontAxis, min: 5, max: 24, onCommit: setFontAxis },
+                    ]}
+                  />
                 </>
               ) : (<>
+              <h3>{t("Colours")}</h3>
               <label className="gl-field-inline" title={coloursPopulations ? t("Population colours are set in the population tree") : undefined}>
                 {t("Palette")}
                 <select
@@ -1345,29 +1342,22 @@ export function PlottingTab({
                 </select>
               </label>
               {coloursPopulations && <span className="gl-hint">{t("Population colours are set in the population tree")}</span>}
-              <span className="gl-ctl-sep" />
-              <FigureStyleFollow following={followFigureStyle} onFollow={setFollowFigureStyle} />
-              {!followFigureStyle && (
-                <>
-                  <label className="gl-field-inline">
-                    {t("Tick")}
-                    <NumberField value={fontTick} min={5} max={20} integer onCommit={setFontTick} />
-                  </label>
-                  <label className="gl-field-inline">
-                    {t("Axis")}
-                    <NumberField value={fontAxis} min={5} max={24} integer onCommit={setFontAxis} />
-                  </label>
-                  <label className="gl-field-inline">
-                    {t("Legend")}
-                    <NumberField value={fontLegend} min={5} max={20} integer onCommit={setFontLegend} />
-                  </label>
-                </>
+              {xAxis === "groups" && valueKind !== "proportion" && (
+                <label className="gl-check" title={t("Colour each mark by its panel's population in place of its group, as an Illustration summary panel does")}>
+                  <input
+                    type="checkbox"
+                    checked={colourByPopulation || populationsTogether}
+                    disabled={populationsTogether}
+                    onChange={(event) => setColourByPopulation(event.target.checked)}
+                  />
+                  {t("Colour by population")}
+                </label>
               )}
+              <h3>{t("Size")}</h3>
               <label className="gl-field-inline">
                 {t("Plot height")}
                 <NumberField value={chartHeight} min={140} max={800} integer onCommit={setChartHeight} />
               </label>
-              <span className="gl-ctl-sep" />
               <label className="gl-field-inline" title={t("Each panel's width in pixels, its margins included; 0 fits it to its contents")}>
                 {t("Panel width")}
                 <NumberField
@@ -1388,6 +1378,7 @@ export function PlottingTab({
               >
                 {t("Match Illustration panel size")}
               </button>
+              <h3>{t("Display")}</h3>
               <label className="gl-check">
                 <input
                   type="checkbox"
@@ -1431,17 +1422,6 @@ export function PlottingTab({
                 {t("Show n")}
               </label>
               {xAxis === "groups" && valueKind !== "proportion" && (
-                <label className="gl-check" title={t("Colour each mark by its panel's population in place of its group, as an Illustration summary panel does")}>
-                  <input
-                    type="checkbox"
-                    checked={colourByPopulation || populationsTogether}
-                    disabled={populationsTogether}
-                    onChange={(event) => setColourByPopulation(event.target.checked)}
-                  />
-                  {t("Colour by population")}
-                </label>
-              )}
-              {xAxis === "groups" && valueKind !== "proportion" && (
                 <label className="gl-check" title={t("Draw every population in one panel, side by side at each group and coloured by population, as an Illustration summary panel does")}>
                   <input
                     type="checkbox"
@@ -1451,10 +1431,21 @@ export function PlottingTab({
                   {t("Populations side by side in one panel")}
                 </label>
               )}
+              <label className="gl-field-inline">
+                {t("Point size")}
+                <input
+                  type="range"
+                  min={0.5}
+                  max={5}
+                  step={0.5}
+                  value={pointRadius}
+                  disabled={cells || plotType === "stacked" || (plotType !== "dots" && !showPoints)}
+                  onChange={(event) => setPointRadius(+event.target.value)}
+                />
+              </label>
               {plotType === "ridgeline" && (
                 <>
-                  <span className="gl-ctl-sep" />
-                  <span className="gl-field-inline">{t("Ridges")}</span>
+                  <h3>{t("Ridges")}</h3>
                   <label className="gl-field-inline" title={t("How far each ridge overlaps the row above it, as a fraction of its height")}>
                     {t("Overlap")}
                     <input
@@ -1518,20 +1509,7 @@ export function PlottingTab({
                   </label>
                 </>
               )}
-              <label className="gl-field-inline">
-                {t("Point size")}
-                <input
-                  type="range"
-                  min={0.5}
-                  max={5}
-                  step={0.5}
-                  value={pointRadius}
-                  disabled={cells || plotType === "stacked" || (plotType !== "dots" && !showPoints)}
-                  onChange={(event) => setPointRadius(+event.target.value)}
-                />
-              </label>
-              <span className="gl-ctl-sep" />
-              <span className="gl-field-inline">{t("Value axis")}</span>
+              <h3>{t("Value axis")}</h3>
               <label
                 className="gl-field-inline"
                 title={channelChart
@@ -1581,6 +1559,15 @@ export function PlottingTab({
                 />
                 {t("Same axis in every panel")}
               </label>
+              <FigureTypography
+                following={followFigureStyle}
+                onFollow={setFollowFigureStyle}
+                sizes={[
+                  { key: "fontTick", value: fontTick, min: 5, max: 20, onCommit: setFontTick },
+                  { key: "fontAxis", value: fontAxis, min: 5, max: 24, onCommit: setFontAxis },
+                  { key: "fontLegend", value: fontLegend, min: 5, max: 20, onCommit: setFontLegend },
+                ]}
+              />
               </>)}
             </div>
           </section>
@@ -1589,7 +1576,7 @@ export function PlottingTab({
             className="gl-control-section gl-prop-section-export"
             aria-labelledby="prop-export-heading"
           >
-            <span id="prop-export-heading" className="gl-control-section-label">
+            <span id="prop-export-heading" className="gl-control-section-label gl-sr-only">
               {t("Export")}
             </span>
             <div className="gl-control-section-body">
@@ -1619,6 +1606,8 @@ export function PlottingTab({
                   {pagesMenu.menu}
                 </div>
               )}
+              <h3>{t("Export current page")}</h3>
+              <div className="gl-plotting-actions">
               <button
                 className="gl-mini-btn"
                 title={t("The chart and its legend as a PNG at 300 dpi")}
@@ -1648,6 +1637,7 @@ export function PlottingTab({
               >
                 {t("Data (CSV)")}
               </button>
+              </div>
               {pages.length > 0 && <p className="gl-hint">{t("Export writes the page shown, page {n} of {count}.", { n: currentPage + 1, count: pages.length })}</p>}
             </div>
           </section>

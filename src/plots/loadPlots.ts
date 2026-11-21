@@ -521,6 +521,39 @@ export function patchControlUnderlay(src: string): string {
 }
 
 /**
+ * The width the plot's side is taken from, for an area with padding. The plot measures the area's
+ * whole width and draws its card 14 px narrower (its side is 32 px less, plus an 18 px Y-title
+ * gutter), which fits an area padded 7 px a side, as the Gating tab's grid cells are. The single
+ * Gating plot's area is padded 28 px a side, so a plot sized by width ran 42 px past the padding and
+ * into the right-hand pane, where the pane's resize strip lay over the plot's grip (David,
+ * 2026-11-21). The width used is now at most the area's inner width plus 14 px: an area padded 7 px
+ * a side or less is measured as before, a wider padding is allowed for.
+ */
+export const AVAILABLE_WIDTH_SRC =
+  "function _glAvailW(el) {\n" +
+  "    var w = (el.getBoundingClientRect().width || el.clientWidth) | 0;\n" +
+  "    var cs = window.getComputedStyle(el);\n" +
+  "    var inner = w - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0) - (parseFloat(cs.borderLeftWidth) || 0) - (parseFloat(cs.borderRightWidth) || 0);\n" +
+  "    return Math.min(w, Math.floor(inner) + 14);\n" +
+  "}\n";
+
+export function patchAvailableWidth(src: string): string {
+  const pairs: [string, string][] = [
+    ["_availW = (_el.getBoundingClientRect().width || _el.clientWidth) | 0;", "_availW = _glAvailW(_el); // GateLab: allows for the area's padding"],
+    ["_chkW = (_chkEl.getBoundingClientRect().width || _chkEl.clientWidth) | 0;", "_chkW = _glAvailW(_chkEl); // GateLab: allows for the area's padding"],
+  ];
+  if (src.includes("_glAvailW(_el); // GateLab")) return src;
+  if (pairs.some(([needle]) => src.split(needle).length !== 2) || src.split("    function _init() {").length !== 2) {
+    console.warn("[GateLab] cytof available-width patch did not match; a plot in a padded area may run past its padding.");
+    return src;
+  }
+  // Defined beside _init, in the scope both measurements run in.
+  let out = src.replace("    function _init() {", `${AVAILABLE_WIDTH_SRC}    function _init() {`);
+  for (const [needle, patched] of pairs) out = out.replace(needle, patched);
+  return out;
+}
+
+/**
  * The plot's side follows the width of the area it sits in, between 380 and 630 px. On a phone
  * the area is about 360 px, so a 380 px plot ran past the right edge and the page scrolled
  * sideways. The floor is 300 px, which keeps 230 px of data between the axes. Gate coordinates
@@ -630,6 +663,7 @@ export function patchCytofForGateLab(src: string): string {
   out = patchOverlayDrawOrder(out);
   out = patchPolygonDraftKeys(out);
   out = patchControlUnderlay(out);
+  out = patchAvailableWidth(out);
   out = patchPlotWidthFloor(out);
   out = patchExactPlotSize(out);
   out = patchNoOuterTicks(out);

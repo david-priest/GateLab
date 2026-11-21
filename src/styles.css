@@ -4164,6 +4164,13 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
   background: linear-gradient(135deg, transparent 0 45%, var(--muted) 45% 52%, transparent 52% 65%, var(--muted) 65% 72%, transparent 72% 85%, var(--muted) 85% 92%, transparent 92%);
 }
 .gl-plot-resize:hover { opacity: 1; background-color: var(--gl-color-hover); }
+/* Out of sight until the pointer is on the plot's bottom-right corner, where the cursor turns to the
+   resize arrows (David, 2026-11-21: "only appear when the user moves the mouse over the bottom right
+   corner"). Kept while a drag is under way, and always shown where there is no hover. */
+@media (hover: hover) {
+  .gl-plot-resize { opacity: 0; transition: opacity 120ms ease-out; }
+  .gl-plot-resize:hover, .gl-plot-resize.is-dragging { opacity: 1; }
+}
 .gl-plot-resize-outline { position: absolute; z-index: 3; border: 1px dashed var(--accent); pointer-events: none; }
 .gl-plot-resize-size {
   position: absolute; z-index: 4; transform: translate(-100%, 4px); padding: 1px 6px; border-radius: 4px;
@@ -4842,6 +4849,9 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
   display: flex; flex-wrap: wrap; gap: 2px; margin: calc(-1 * var(--gl-pane-padding)) calc(-1 * var(--gl-pane-padding)) var(--gl-space-3);
   padding: var(--gl-space-2) var(--gl-space-2); border-bottom: 1px solid var(--line);
 }
+/* The side tabs stay at the top of the pane while its controls scroll under them (David,
+   2026-11-20: "sub tabs should not scroll away, they should be frozen"). */
+.gl-presentation-tabs { position: sticky; top: calc(-1 * var(--gl-pane-padding)); z-index: 5; background: var(--panel); }
 .gl-presentation-tabs button {
   min-height: var(--gl-control-height); padding: 0 var(--gl-space-2); border: 1px solid transparent; border-radius: var(--gl-radius-md);
   background: transparent; color: var(--gl-color-text-secondary); font-size: var(--gl-font-size-body); cursor: default;
@@ -5042,6 +5052,36 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-plotting-workspace.gl-plotting-headless { grid-template-rows: minmax(0, 1fr); }
 .gl-plotting-inspector .gl-presentation-tabs .gl-tab-intro-show { margin-left: auto; }
 .gl-prop-layout-actions { flex-wrap: wrap; gap: 6px; }
+/* Plotting's side pane in the Illustration inspector's look (David, 2026-11-20: "harmonise this
+   with plotting tab ... clean up the currently messy layout on both tabs"). A field is a row, its
+   label at the left in 13 px text and its box beside it, as tall as Illustration's, and the boxes
+   of the fields below one another line up (the label column is --gl-side-field-label, which the
+   Illustration inspector takes too); a check box label is the same size. The sections lose their
+   box and size to their contents: a wide section's 390 px flex basis became its height in this
+   column, an empty box under Arrange's panels. Each side tab's controls are grouped under titles
+   drawn as Illustration's, the section's own name hidden where it only repeated the side tab's,
+   and the counts in the Files and Populations titles sit at the right, as Illustration's do. */
+.gl-figure-inspector, .gl-plotting-headless .gl-plotting-inspector { --gl-side-field-label: 108px; }
+.gl-plotting-headless .gl-plotting-inspector .gl-control-section { flex: 0 0 auto; background: transparent; }
+.gl-plotting-headless .gl-plotting-inspector .gl-control-section-body { gap: 6px; }
+.gl-plotting-headless .gl-plotting-inspector .gl-control-section-body h3 { margin: 10px 0 2px; }
+.gl-plotting-headless .gl-plotting-inspector .gl-control-section-body > h3:first-child { margin-top: 0; }
+.gl-plotting-headless .gl-plotting-inspector .gl-control-section-body .gl-field-inline {
+  display: grid; grid-template-columns: var(--gl-side-field-label) minmax(0, 1fr); grid-auto-flow: column; grid-auto-columns: max-content;
+  align-items: center; column-gap: 7px; font-size: var(--gl-font-size-body); color: var(--text);
+}
+.gl-plotting-headless .gl-plotting-inspector .gl-field-inline > select,
+.gl-plotting-headless .gl-plotting-inspector .gl-field-inline > input:not([type="checkbox"]):not([type="range"]) {
+  width: 100%; min-width: 0; padding: 6px; border-color: #d5dde8; font-size: var(--gl-font-size-body);
+}
+.gl-plotting-headless .gl-plotting-inspector .gl-field-inline > input[type="range"] { width: 100%; }
+.gl-plotting-headless .gl-plotting-inspector .gl-check { margin: 0; gap: 7px; font-size: var(--gl-font-size-body); }
+.gl-plotting-headless .gl-plotting-inspector .gl-control-section-body > button { align-self: flex-start; }
+.gl-plotting-headless .gl-plotting-inspector .gl-figure-typography { display: flex; flex-direction: column; gap: 6px; }
+.gl-plotting-headless .gl-plotting-inspector .gl-figure-typography .gl-hint { margin: 0; }
+.gl-plotting-headless .gl-plotting-inspector > section > h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.gl-plotting-headless .gl-plotting-inspector > section > h3 > span { color: #66768b; font-weight: 400; white-space: nowrap; }
+.gl-plotting-headless .gl-plotting-inspector .gl-file-checklist-search { width: 100%; margin: 6px 0 4px; padding: 4px 6px; border: 1px solid #d5dde8; border-radius: 4px; }
 @media (max-width: 760px) {
   .gl-plotting-workspace.gl-plotting-headless { grid-template-rows: auto; }
 }

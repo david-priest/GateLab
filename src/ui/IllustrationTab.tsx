@@ -88,7 +88,7 @@ import { sanitizeFilePart } from "../engine/fcsExport";
 import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
 import "./figure.css";
 import { NumberField } from "./NumberField";
-import { FigureStyleFollow, useFigureStyle } from "./figureStyle";
+import { FigureStyleField, FigureTypography, useFigureStyle } from "./figureStyle";
 import { useGateInk } from "../plots/gateInk";
 import { highlightedPopIds } from "./gateSelection";
 
@@ -1718,7 +1718,7 @@ export function IllustrationTab({
               role="tabpanel"
               aria-labelledby="figure-tab-style"
             >
-              <h3>Axes & rendering</h3>
+              <h3>{t("Axes")}</h3>
               <label>
                 Axis ranges
                 <select
@@ -1760,11 +1760,115 @@ export function IllustrationTab({
                   </button>
                 </>
               )}
-              {figure.plots.some((p) => p.type === "heatmap") && (
-                <details open>
-                  <FoldSummary>Summary heatmap</FoldSummary>
+              <h3>{t("Points")}</h3>
+              <label>
+                {t("Display")}
+                <select
+                  value={
+                    figure.composition === "overlay"
+                      ? "scatter"
+                      : config.displayMode
+                  }
+                  disabled={figure.composition === "overlay"}
+                  onChange={(e) => style({ displayMode: e.target.value })}
+                >
+                  <option value="pseudocolor">{t("Pseudocolour")}</option>
+                  <option value="scatter">{t("Scatter")}</option>
+                  <option value="contour">{t("Contour")}</option>
+                </select>
+              </label>
+              <label>
+                {t("Preview events per panel")}
+                <NumberField
+                  min={100}
+                  max={1000000}
+                  step={1000}
+                  integer
+                  value={config.maxEvents}
+                  disabled={!!config.allEvents}
+                  onCommit={(maxEvents) => style({ maxEvents })}
+                />
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  aria-label="Preview all events"
+                  checked={!!config.allEvents}
+                  onChange={(e) => style({ allEvents: e.target.checked })}
+                />
+                {t("All events, within the page budget")}
+              </label>
+              <p>
+                {t("Preview has a 1,000,000-point page budget, shared by the panels on the page; All events draws every event within it. Counts use every event. Export can draw all events.")}
+              </p>
+              <label>
+                {t("Point size")}
+                <NumberField
+                  min={0.25}
+                  max={5}
+                  step={0.25}
+                  value={config.pointSize}
+                  onCommit={(pointSize) => style({ pointSize })}
+                />
+              </label>
+              <label>
+                {t("Opacity")} {config.pointAlpha}
+                <input
+                  type="range"
+                  min={0.05}
+                  max={1}
+                  step={0.05}
+                  value={config.pointAlpha}
+                  onChange={(e) =>
+                    style({ pointAlpha: Number(e.target.value) })
+                  }
+                />
+              </label>
+              {config.displayMode === "pseudocolor" &&
+                figure.composition !== "overlay" && (
                   <label>
-                    Statistic
+                    {t("Density contrast")}
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={3}
+                      step={0.1}
+                      value={config.densityColorPower}
+                      onChange={(e) =>
+                        style({ densityColorPower: Number(e.target.value) })
+                      }
+                    />
+                  </label>
+                )}
+              {config.displayMode === "contour" && (
+                <>
+                  <label>
+                    {t("Contour %")}
+                    <NumberField
+                      min={0}
+                      max={50}
+                      value={config.contourThreshold}
+                      onCommit={(contourThreshold) => style({ contourThreshold })}
+                    />
+                  </label>
+                  <label>
+                    {t("Smoothing (0 = automatic)")}
+                    <NumberField
+                      min={0}
+                      max={14}
+                      step={0.2}
+                      value={config.kdeBandwidth}
+                      onCommit={(kdeBandwidth) => style({ kdeBandwidth })}
+                    />
+                  </label>
+                  <label>{t("Number of contours")}<NumberField min={2} max={30} integer value={config.contourLevels ?? 10} onCommit={(contourLevels) => style({ contourLevels })} /></label>
+                </>
+              )}
+              {figure.plots.some((p) => p.type === "heatmap") && (
+                <>
+                  <h3>{t("Summary heatmap")}</h3>
+                  <label>
+                    {t("Statistic")}
                     <select
                       value={config.heatmapStat ?? "median"}
                       onChange={(e) =>
@@ -1773,12 +1877,12 @@ export function IllustrationTab({
                         })
                       }
                     >
-                      <option value="median">Median</option>
-                      <option value="mean">Mean</option>
+                      <option value="median">{t("Median")}</option>
+                      <option value="mean">{t("Mean")}</option>
                     </select>
                   </label>
                   <label>
-                    Colour scale
+                    {t("Colour scale")}
                     <select
                       value={config.heatmapScale ?? "column_quantile"}
                       onChange={(e) =>
@@ -1789,20 +1893,20 @@ export function IllustrationTab({
                       }
                     >
                       <option value="column_quantile">
-                        Per channel: 1st to 99th percentile of the events
+                        {t("Per channel: 1st to 99th percentile of the events")}
                       </option>
                       <option value="column_minmax">
-                        Per channel: minimum–maximum of the summaries
+                        {t("Per channel: minimum–maximum of the summaries")}
                       </option>
                       <option value="row_minmax">
-                        Per row: minimum–maximum
+                        {t("Per row: minimum–maximum")}
                       </option>
-                      <option value="column_zscore">Per channel: z-score</option>
-                      <option value="none">Unscaled transformed expression</option>
+                      <option value="column_zscore">{t("Per channel: z-score")}</option>
+                      <option value="none">{t("Unscaled transformed expression")}</option>
                     </select>
                   </label>
                   <label>
-                    Cell size
+                    {t("Cell size")}
                     <NumberField
                       min={12}
                       max={120}
@@ -1817,7 +1921,7 @@ export function IllustrationTab({
                       checked={config.heatmapClusterRows === true}
                       onChange={(e) => style({ heatmapClusterRows: e.target.checked })}
                     />
-                    Cluster rows (average linkage, with dendrogram); off, rows follow the population order under Arrange
+                    {t("Cluster rows (average linkage, with dendrogram); off, rows follow the population order under Arrange")}
                   </label>
                   <label>
                     <input
@@ -1825,43 +1929,20 @@ export function IllustrationTab({
                       checked={config.heatmapClusterColumns === true}
                       onChange={(e) => style({ heatmapClusterColumns: e.target.checked })}
                     />
-                    Cluster channels; off, they follow the plot order under Plots
+                    {t("Cluster channels; off, they follow the plot order under Plots")}
                   </label>
                   <label>
-                    Beside the rows
+                    {t("Beside the rows")}
                     <select
                       value={config.heatmapBars ?? "counts"}
                       onChange={(e) => style({ heatmapBars: e.target.value as IllustrationConfig["heatmapBars"] })}
                     >
-                      <option value="counts">Event counts as bars</option>
-                      <option value="none">Nothing</option>
+                      <option value="counts">{t("Event counts as bars")}</option>
+                      <option value="none">{t("Nothing")}</option>
                     </select>
                   </label>
-                  <p>
-                    {t("One matrix per page: a row per population and file, a column per heatmap plot. Statistics use all finite events; the percentile scaling pools the events of every row, so a channel's colours compare across the page. Numbers show the unscaled statistic.")}
-                  </p>
-                </details>
-              )}
-              <label>
-                Display
-                <select
-                  value={
-                    figure.composition === "overlay"
-                      ? "scatter"
-                      : config.displayMode
-                  }
-                  disabled={figure.composition === "overlay"}
-                  onChange={(e) => style({ displayMode: e.target.value })}
-                >
-                  <option value="pseudocolor">Pseudocolour</option>
-                  <option value="scatter">Scatter</option>
-                  <option value="contour">Contour</option>
-                </select>
-              </label>
-              {figure.plots.some((p) => p.type === "heatmap") && (
-                <>
                   <label>
-                    Heatmap palette
+                    {t("Heatmap palette")}
                     <select
                       value={config.heatmapPalette ?? "rdylbu"}
                       onChange={(e) =>
@@ -1871,12 +1952,12 @@ export function IllustrationTab({
                         })
                       }
                     >
-                      <option value="rdylbu">Red–yellow–blue (RdYlBu)</option>
+                      <option value="rdylbu">{t("Red–yellow–blue (RdYlBu)")}</option>
                       <option value="blue_white_yellow_red">
-                        Blue–white–yellow–red
+                        {t("Blue–white–yellow–red")}
                       </option>
                       <option value="viridis">Viridis</option>
-                      <option value="heat">Heat</option>
+                      <option value="heat">{t("Heat")}</option>
                     </select>
                   </label>
                   <label>
@@ -1887,20 +1968,24 @@ export function IllustrationTab({
                         style({ heatmapShowValues: e.target.checked })
                       }
                     />
-                    Show summary values
+                    {t("Show summary values")}
                   </label>
+                  <p>
+                    {t("One matrix per page: a row per population and file, a column per heatmap plot. Statistics use all finite events; the percentile scaling pools the events of every row, so a channel's colours compare across the page. Numbers show the unscaled statistic.")}
+                  </p>
                 </>
               )}
               {figure.plots.some((p) => p.type === "histogram") && (
                 <>
+                  <h3>{t("Histograms")}</h3>
                   <label>
-                    Histogram arrangement
+                    {t("Histogram arrangement")}
                     <select
                       value={config.histLayout}
                       onChange={(e) => style({ histLayout: e.target.value })}
                     >
-                      <option value="grid">Density plot</option>
-                      <option value="ridgeline">Stacked ridgelines</option>
+                      <option value="grid">{t("Density plot")}</option>
+                      <option value="ridgeline">{t("Stacked ridgelines")}</option>
                     </select>
                   </label>
                   {config.histLayout === "ridgeline" && (
@@ -1909,7 +1994,7 @@ export function IllustrationTab({
                         {t("Overlay files or populations to stack their distributions within a panel. Each ridge is peak-normalised.")}
                       </p>
                       <label>
-                        Ridge overlap
+                        {t("Ridge overlap")}
                         <input
                           type="range"
                           min={0}
@@ -1929,117 +2014,23 @@ export function IllustrationTab({
                             style({ ridgeGradient: e.target.checked })
                           }
                         />
-                        Intensity gradient
+                        {t("Intensity gradient")}
                       </label>
                     </>
                   )}
-                </>
-              )}
-              <label>
-                Preview events per panel
-                <NumberField
-                  min={100}
-                  max={1000000}
-                  step={1000}
-                  integer
-                  value={config.maxEvents}
-                  disabled={!!config.allEvents}
-                  onCommit={(maxEvents) => style({ maxEvents })}
-                />
-              </label>
-              <label>
-                <input
-                  type="checkbox"
-                  aria-label="Preview all events"
-                  checked={!!config.allEvents}
-                  onChange={(e) => style({ allEvents: e.target.checked })}
-                />
-                All events, within the page budget
-              </label>
-              <p>
-                Preview has a 1,000,000-point page budget, shared by the panels on the page;
-                All events draws every event within it. Counts use every event. Export can
-                draw all events.
-              </p>
-              <label>
-                Point size
-                <NumberField
-                  min={0.25}
-                  max={5}
-                  step={0.25}
-                  value={config.pointSize}
-                  onCommit={(pointSize) => style({ pointSize })}
-                />
-              </label>
-              <label>
-                Opacity {config.pointAlpha}
-                <input
-                  type="range"
-                  min={0.05}
-                  max={1}
-                  step={0.05}
-                  value={config.pointAlpha}
-                  onChange={(e) =>
-                    style({ pointAlpha: Number(e.target.value) })
-                  }
-                />
-              </label>
-              {config.displayMode === "pseudocolor" &&
-                figure.composition !== "overlay" && (
-                  <label>
-                    Density contrast
-                    <input
-                      type="range"
-                      min={0.5}
-                      max={3}
-                      step={0.1}
-                      value={config.densityColorPower}
-                      onChange={(e) =>
-                        style({ densityColorPower: Number(e.target.value) })
-                      }
-                    />
-                  </label>
-                )}
-              {config.displayMode === "contour" && (
-                <>
-                  <label>
-                    Contour %
-                    <NumberField
-                      min={0}
-                      max={50}
-                      value={config.contourThreshold}
-                      onCommit={(contourThreshold) => style({ contourThreshold })}
-                    />
-                  </label>
-                  <label>
-                    Smoothing (0 = automatic)
-                    <NumberField
-                      min={0}
-                      max={14}
-                      step={0.2}
-                      value={config.kdeBandwidth}
-                      onCommit={(kdeBandwidth) => style({ kdeBandwidth })}
-                    />
-                  </label>
-                  <label>Number of contours<NumberField min={2} max={30} integer value={config.contourLevels ?? 10} onCommit={(contourLevels) => style({ contourLevels })} /></label>
-                </>
-              )}
-              {figure.plots.some((p) => p.type === "histogram") && (
-                <details>
-                  <FoldSummary>Histogram style</FoldSummary>
                   <label>
                     <input
                       type="checkbox"
                       checked={config.histFill}
                       onChange={(e) => style({ histFill: e.target.checked })}
                     />
-                    Fill density
+                    {t("Fill density")}
                   </label>
                   {config.followFigureStyle ? (
-                    <FigureStyleFollow following onFollow={(followFigureStyle) => style({ followFigureStyle })} />
+                    <FigureStyleField styleKey="histLineWidth" label={t("Line width (pt)")} title={t("The workspace figure style's histogram line width, shared with every tab that uses it; set under Typography whether this figure uses the style")} />
                   ) : (
                   <label>
-                    Line width
+                    {t("Line width")}
                     <NumberField
                       min={0.5}
                       max={5}
@@ -2049,10 +2040,10 @@ export function IllustrationTab({
                     />
                   </label>
                   )}
-                  <p>Histograms show density, not absolute event counts.</p>
-                </details>
+                  <p>{t("Histograms show density, not absolute event counts.")}</p>
+                </>
               )}
-              <h3>Gates</h3>
+              <h3>{t("Gates")}</h3>
               <label>
                 <input
                   type="checkbox"
@@ -2143,37 +2134,24 @@ export function IllustrationTab({
                   <option value="none">None</option>
                 </select>
               </label>
-              <details>
-                <FoldSummary>Typography</FoldSummary>
-                <FigureStyleFollow following={!!config.followFigureStyle} onFollow={(followFigureStyle) => style({ followFigureStyle })} />
-                {!config.followFigureStyle && (
-                  ["fontTick", "fontAxis", "fontTitle", "fontGate"] as const
-                ).map((key) => (
-                  <label key={key}>
-                    {
-                      {
-                        fontTick: "Ticks",
-                        fontAxis: "Axes",
-                        fontTitle: "Headings",
-                        fontGate: "Gate labels",
-                      }[key]
-                    }
-                    <NumberField
-                      min={8}
-                      max={24}
-                      integer
-                      value={config[key]}
-                      onCommit={(size) => style({ [key]: size })}
-                    />
-                  </label>
-                ))}
-                <label><input type="checkbox" checked={config.scaleFontsWithPlot} onChange={e => style({ scaleFontsWithPlot: e.target.checked })} />Scale fonts with panel size</label>
-                <p>{config.scaleFontsWithPlot ? "Font sizes are specified at a 280 px panel and scale proportionally." : "Font sizes stay fixed when you resize a panel."}</p>
+              <FigureTypography
+                following={!!config.followFigureStyle}
+                onFollow={(followFigureStyle) => style({ followFigureStyle })}
+                sizes={(["fontTick", "fontAxis", "fontTitle", "fontGate"] as const).map((key) => ({
+                  key,
+                  value: config[key],
+                  min: 8,
+                  max: 24,
+                  onCommit: (size: number) => style({ [key]: size }),
+                }))}
+              >
+                <label><input type="checkbox" checked={config.scaleFontsWithPlot} onChange={e => style({ scaleFontsWithPlot: e.target.checked })} />{t("Scale fonts with panel size")}</label>
+                <p>{config.scaleFontsWithPlot ? t("Font sizes are specified at a 280 px panel and scale proportionally.") : t("Font sizes stay fixed when you resize a panel.")}</p>
                 {/* The distance of each axis title from its axis. Left alone, the renderer sets it
                     from the widest tick label of that axis ("6" on a CyTOF axis, "100K" on a flow
                     one); set by hand, both are in px at a 280 px panel and scale with the fonts. */}
                 <label
-                  title="Unticked, each axis title sits just past that axis's widest tick label. Ticked, the distances below are used, in px from the axis line."
+                  title={t("Unticked, each axis title sits just past that axis's widest tick label. Ticked, the distances below are used, in px from the axis line.")}
                 >
                   <input
                     type="checkbox"
@@ -2189,35 +2167,35 @@ export function IllustrationTab({
                       )
                     }
                   />
-                  Set axis title distances
+                  {t("Set axis title distances")}
                 </label>
                 {(config.axisTitleOffsetX != null || config.axisTitleOffsetY != null) && (
                   <>
                     <label>
-                      X title distance
+                      {t("X title distance")}
                       <NumberField
                         min={14}
                         max={100}
                         integer
                         value={config.axisTitleOffsetX ?? Math.round(13 + 0.93 * config.fontTick + 0.75 * config.fontAxis)}
                         onCommit={(axisTitleOffsetX) => style({ axisTitleOffsetX })}
-                        title="From the x axis line down to the title's baseline, px"
+                        title={t("From the x axis line down to the title's baseline, px")}
                       />
                     </label>
                     <label>
-                      Y title distance
+                      {t("Y title distance")}
                       <NumberField
                         min={14}
                         max={100}
                         integer
                         value={config.axisTitleOffsetY ?? Math.round(3 * 0.62 * config.fontTick + 14 + 0.25 * config.fontAxis)}
                         onCommit={(axisTitleOffsetY) => style({ axisTitleOffsetY })}
-                        title="From the y axis line out to the title's baseline, px"
+                        title={t("From the y axis line out to the title's baseline, px")}
                       />
                     </label>
                   </>
                 )}
-              </details>
+              </FigureTypography>
             </section>
             <section
               hidden={section !== "export"}
@@ -2296,7 +2274,7 @@ export function IllustrationTab({
                   {pagesMenu.menu}
                 </div>
               )}
-              <h3>Export current page</h3>
+              <h3>{t("Export current page")}</h3>
               <p>
                 Page {currentPage + 1} of {pages.length || 1}. Export is
                 independent of preview zoom.
@@ -2346,8 +2324,8 @@ export function IllustrationTab({
               {problems.length > 0 && (
                 <p role="alert">Resolve unavailable panels before exporting.</p>
               )}
-              <details>
-                <FoldSummary>Saved figures & presets</FoldSummary>
+              <>
+                <h3>{t("Saved figures & presets")}</h3>
                 <label>
                   Preset
                   <select
@@ -2408,7 +2386,7 @@ export function IllustrationTab({
                 >
                   Save figure preset
                 </button>
-              </details>
+              </>
             </section>
           </fieldset>
         </aside>

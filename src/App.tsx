@@ -27,8 +27,9 @@ import { ActionNote } from "./ui/ActionNote";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
 import { buildCompanionPlot, type CompanionPlot, type CompanionPlotInput, type CompanionPlotView, type CompanionPoolFile } from "./plots/companionPlotPayload";
 import { GatingCompanionPlot } from "./ui/GatingCompanionPlot";
+import { PlotRemoveButton } from "./ui/PlotRemoveButton";
 import { GatingPlotResizeHandle } from "./ui/GatingPlotResizeHandle";
-import { MAX_GATING_PLOTS, ONE_GATING_PLOT, addGatingPlot, plotGridShape, removeGatingPlot, selectGatingPlot, type GatingPlots } from "./ui/gatingPlotViews";
+import { MAX_GATING_PLOTS, ONE_GATING_PLOT, addGatingPlot, plotGridLayout, plotGridShape, removeGatingPlot, selectGatingPlot, type GatingPlots } from "./ui/gatingPlotViews";
 import { startPanSession, zoomAnchored } from "./plots/panGesture";
 import { buildPlotGates, keepOpenSides, plotGatesInPlotOrientation, type PlotGate } from "./plots/gatePayload";
 import { HistogramPlot, type RangeEdit } from "./plots/HistogramPlot";
@@ -15918,20 +15919,14 @@ export default function App({ hostProposals = null }: {
     const pad = 6;
     const width = plotGridBox.width - 2 * pad;
     const height = plotGridBox.height - 2 * pad;
-    const shape = plotGridShape(gatingPlots.slots.length, width, height);
-    // A side set by the grip makes every cell that plot's size (the engine draws 32 px narrower than its cell).
-    if (gatingPlotSide) {
-      return { gap, padding: pad, gridTemplateColumns: `repeat(${shape.columns}, ${gatingPlotSide + 32}px)`, gridAutoRows: `${gatingPlotSide + 32}px` };
-    }
-    if (plotGridBox.width <= 0 || plotGridBox.height <= 0) {
+    if (!gatingPlotSide && (plotGridBox.width <= 0 || plotGridBox.height <= 0)) {
+      const shape = plotGridShape(gatingPlots.slots.length, width, height);
       return { gap, padding: pad, gridTemplateColumns: `repeat(${shape.columns}, minmax(0, 1fr))` };
     }
-    // Never under the engine's smallest plot and its margin; a smaller area scrolls.
-    const side = Math.max(336, Math.floor(Math.min(
-      (width - (shape.columns - 1) * gap) / shape.columns,
-      (height - (shape.rows - 1) * gap) / shape.rows,
-    )));
-    return { gap, padding: pad, gridTemplateColumns: `repeat(${shape.columns}, ${side}px)`, gridAutoRows: `${side}px` };
+    // The cells are fitted to the area, at most the engine's largest plot; a side set by the grip
+    // makes every cell that plot's size (the engine draws 32 px narrower than its cell), wrapping.
+    const { columns, side } = plotGridLayout(gatingPlots.slots.length, width, height, gap, gatingPlotSide);
+    return { gap, padding: pad, gridTemplateColumns: `repeat(${columns}, ${side}px)`, gridAutoRows: `${side}px` };
   }, [multiPlot, gatingPlots.slots.length, plotGridBox, gatingPlotSide]);
 
   /** The X values of the points the scatter plot draws, for the histogram view: same pool, same cap. */
@@ -18240,15 +18235,11 @@ export default function App({ hostProposals = null }: {
                 </div>
               )}
               {multiPlot && (
-                <button
-                  type="button"
-                  className="gl-plot-remove"
-                  aria-label={t("Remove plot {number}", { number: gatingPlots.selected + 1 })}
+                <PlotRemoveButton
+                  label={t("Remove plot {number}", { number: gatingPlots.selected + 1 })}
                   title={t("Remove this plot")}
                   onClick={() => removePlot(gatingPlots.selected)}
-                >
-                  ×
-                </button>
+                />
               )}
             </div>
             {multiPlot && gatingPlots.slots.flatMap((slot, index) => {

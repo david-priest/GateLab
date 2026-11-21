@@ -13,6 +13,7 @@ import type { CompanionPlot, CompanionPlotView } from "../plots/companionPlotPay
 import { GatingPlot } from "../plots/GatingPlot";
 import { HistogramPlot } from "../plots/HistogramPlot";
 import { useI18n } from "./i18n";
+import { PlotRemoveButton } from "./PlotRemoveButton";
 
 interface Props {
   /** The engine instance this plot draws with; never 0, which is the selected plot's. */
@@ -74,15 +75,7 @@ export function GatingCompanionPlot({ instance, number, view, plot, visible, fon
         title={t("Click to work on this plot")}
         onClick={onSelect}
       />
-      <button
-        type="button"
-        className="gl-plot-remove"
-        aria-label={t("Remove plot {number}", { number })}
-        title={t("Remove this plot")}
-        onClick={onRemove}
-      >
-        ×
-      </button>
+      <PlotRemoveButton label={t("Remove plot {number}", { number })} title={t("Remove this plot")} onClick={onRemove} />
     </div>
   );
 }

@@ -5,7 +5,7 @@
 // The gates' line width and colour shown in the editor are the workspace's gate ink (gateInk.ts),
 // the setting the Gating tab's Display and every other tab already share.
 
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useId, useMemo, useState, type ReactNode } from "react";
 import { DEFAULT_FIGURE_STYLE, normalizeFigureStyle, type FigureStyle, type FigureStyleKey } from "../engine/figureStyle";
 import { createDefaultLayoutWorkspace, LAYOUT_STYLE_RANGES, type LayoutPlotStyle, type LayoutWorkspace } from "../engine/layout";
 import { DEFAULT_GATE_LINE_WIDTH, MAX_GATE_LINE_WIDTH, MIN_GATE_LINE_WIDTH, useGateInk, type GateInk } from "../plots/gateInk";
@@ -134,6 +134,82 @@ export function FigureStyleEditor({ onClose }: Readonly<{ onClose: () => void }>
           <button type="button" className="gl-btn" onClick={onClose}>{t("Close")}</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** A text size a tab draws with, as the tab holds it: in px, within the tab's own range. */
+export interface TabTextSize {
+  key: Exclude<FigureStyleKey, "histLineWidth">;
+  value: number;
+  min: number;
+  max: number;
+  onCommit: (px: number) => void;
+}
+
+const TEXT_LABEL = Object.fromEntries(TEXT_FIELDS.map(({ key, label }) => [key, label])) as Record<FigureStyleKey, string>;
+
+/**
+ * A field of the workspace's figure style in a tab's side pane, in points, as the editor shows it.
+ * The label is the caller's, so a field placed beside the tab's own (a histogram's line width)
+ * reads as the field it stands in for.
+ */
+export function FigureStyleField({ styleKey, label, title }: Readonly<{ styleKey: FigureStyleKey; label: string; title?: string }>) {
+  const { style, setStyle } = useFigureStyle();
+  const [lo, hi] = LAYOUT_STYLE_RANGES[styleKey].map(ptFromPx);
+  return (
+    <label className="gl-field-inline" title={title}>
+      {label}
+      <NumberField
+        aria-label={label}
+        value={ptFromPx(style[styleKey])}
+        min={lo}
+        max={hi}
+        step={styleKey === "histLineWidth" ? 0.25 : 0.5}
+        format={formatPt}
+        onCommit={(pt) => setStyle({ ...style, [styleKey]: pxFromPt(pt) })}
+      />
+    </label>
+  );
+}
+
+/**
+ * A tab's Typography, open in its side pane (David, 2026-11-20: "do not hide, and do not hide
+ * behind a dialog box"): whether the tab takes the workspace figure style, then the text sizes it
+ * draws with, always in view. Following, they are the style's, in points, and a change reaches
+ * every tab that follows it, as a change in the editor does; otherwise they are the tab's own, in
+ * px. The Illustration and Plotting tabs show it the same way, last in their Style tab; a tab's
+ * further settings (Illustration's axis title distances) follow the sizes as children.
+ */
+export function FigureTypography({ following, onFollow, sizes, children }: Readonly<{
+  following: boolean;
+  onFollow: (follow: boolean) => void;
+  sizes: readonly TabTextSize[];
+  children?: ReactNode;
+}>) {
+  const { t } = useI18n();
+  const headingId = useId();
+  return (
+    <div className="gl-figure-typography" role="group" aria-labelledby={headingId}>
+      <h3 id={headingId}>{t("Typography")}</h3>
+      <label className="gl-check" title={t("Take the text sizes and line widths from the workspace figure style, shared with the other tabs")}>
+        <input type="checkbox" checked={following} onChange={(event) => onFollow(event.target.checked)} />
+        {t("Use the workspace figure style")}
+      </label>
+      <p className="gl-hint">
+        {following
+          ? t("Sizes in pt, shared with every tab that uses the workspace figure style.")
+          : t("Sizes in px, this tab's own.")}
+      </p>
+      {sizes.map(({ key, value, min, max, onCommit }) => following ? (
+        <FigureStyleField key={key} styleKey={key} label={t(TEXT_LABEL[key])} />
+      ) : (
+        <label key={key} className="gl-field-inline">
+          {t(TEXT_LABEL[key])}
+          <NumberField aria-label={t(TEXT_LABEL[key])} value={value} min={min} max={max} integer onCommit={onCommit} />
+        </label>
+      ))}
+      {children}
     </div>
   );
 }

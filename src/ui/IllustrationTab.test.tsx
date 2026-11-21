@@ -607,6 +607,34 @@ describe("IllustrationTab", () => {
   });
 });
 
+describe("the Style tab's Typography", () => {
+  it("shows the text sizes open in the pane, titled like the other sections and last, with no fold or dialog", async () => {
+    const props = fixture();
+    act(() => root.render(<IllustrationTab {...props} />));
+    await flush();
+    act(() => [...host.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((tab) => tab.textContent === "Style")!.click());
+    const style = host.querySelector<HTMLElement>("#figure-section-style")!;
+    expect([...style.querySelectorAll("h3")].map((h) => h.textContent)).toEqual(["Axes", "Points", "Gates", "Typography"]);
+    expect(style.querySelector("details")).toBeNull();
+    expect(button("Edit figure style")).toBeUndefined();
+    const field = (label: string) => style.querySelector<HTMLInputElement>(`.gl-figure-typography input[aria-label="${label}"]`)!;
+    expect(["Tick", "Axis", "Title", "Gate label"].map((label) => field(label).value)).toEqual(["10", "12", "12", "11"]);
+    act(() => {
+      field("Tick").focus();
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(field("Tick"), "13");
+      field("Tick").dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => field("Tick").blur());
+    await flush();
+    expect(props.configRef.current!.fontTick).toBe(13);
+    // Ticked, the figure takes the workspace style, whose sizes are shown in its place, in pt.
+    act(() => style.querySelector<HTMLInputElement>('.gl-figure-typography input[type="checkbox"]')!.click());
+    await flush();
+    expect(props.configRef.current!.followFigureStyle).toBe(true);
+    expect(field("Tick").value).toBe("6.75");
+  });
+});
+
 describe("preview all events", () => {
   it("switches the preview to every event within the page budget, and back", async () => {
     const props = fixture();
