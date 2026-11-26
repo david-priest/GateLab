@@ -150,3 +150,72 @@ describe("Illustration: sending a figure of several pages to Layout", () => {
     expect(props.onAddToLayout.mock.calls[0][0].map((recipe: { sampleId: string }) => recipe.sampleId)).toEqual(["D1"]);
   });
 });
+
+describe("QC sheets from the Illustration data selection", () => {
+  function openQc(controls = false, configure?: (props: ReturnType<typeof fixture>) => void) {
+    const props = fixture();
+    props.samples.forEach((file, i) => {
+      const fcs = file.sample.fcs;
+      file.name = i === 0 ? "FITC control.fcs" : i === 1 ? "PE control.fcs" : "D3.fcs";
+      file.sample = new Sample({ ...fcs, channels: [
+        { ...fcs.channels[0], name: "Time" },
+        { ...fcs.channels[0], index: 1, name: "FITC-A", marker: "Marker " + i },
+        { ...fcs.channels[0], index: 2, name: "PE-A", marker: "Reference" },
+      ], columns: [...fcs.columns, fcs.columns[0]] });
+    });
+    configure?.(props);
+    act(() => root.render(<IllustrationTab {...props} />));
+    const details = [...host.querySelectorAll("details")].find((el) => el.querySelector("summary")?.textContent === "QC sheets")!;
+    act(() => { details.open = true; details.dispatchEvent(new Event("toggle")); });
+    const selects = () => [...details.querySelectorAll("select")];
+    const choose = (el: HTMLSelectElement, value: string) => act(() => { el.value = value; el.dispatchEvent(new Event("change", { bubbles: true })); });
+    if (controls) choose(selects()[0], "control");
+    return { props, selects, choose, details, create: () => button("Create QC sheets in Layout")! };
+  }
+  it("uses the Time axis and the file's own population id in each Layout sheet", () => {
+    const { props, details, create } = openQc();
+    act(() => (details.querySelector('input[type="checkbox"]') as HTMLInputElement).click());
+    expect(create().disabled).toBe(false);
+    act(() => create().click());
+    const [pages] = props.onAddPanelPagesToLayout.mock.calls[0];
+    expect(pages).toHaveLength(3);
+    for (const [i, page] of pages.entries()) {
+      expect(page.recipes).toHaveLength(1);
+      expect(page.recipes[0]).toMatchObject({ xChannel: "Time", sampleId: props.samples[i].id,
+        populationId: props.state.root_population_id, yChannel: props.samples[i].sample.channels[2].key });
+    }
+  });
+  it("requires a primary detector for every control, then resolves each receiver to the correct local channel", () => {
+    const { props, selects, choose, details, create } = openQc(true);
+    expect(selects().slice(1).map((s) => s.value)).toEqual(["FITC-A", "PE-A", ""]);
+    for (const checkbox of details.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')) act(() => checkbox.click());
+    expect(create().disabled).toBe(true);
+    choose(selects()[3], "PE-A");
+    act(() => create().click());
+    const [pages] = props.onAddPanelPagesToLayout.mock.calls[0];
+    expect(pages).toHaveLength(3);
+    for (const [i, page] of pages.entries()) {
+      const c = props.samples[i].sample.channels;
+      expect(page.recipes).toHaveLength(1);
+      expect(page.recipes[0]).toMatchObject({ sampleId: props.samples[i].id,
+        xChannel: c[i === 0 ? 1 : 2].key, yChannel: c[i === 0 ? 2 : 1].key });
+    }
+  });
+  it("adds a selected child only to files where the figure includes that population", () => {
+    const { props, details, create } = openQc(false, (props) => {
+      const rootId = props.state.root_population_id!;
+      const child = { ...newRootPopulation(), population_id: "child", name: "Selected", parent_id: rootId };
+      props.state.populations[child.population_id] = child;
+      props.state.populations[rootId].children = [child.population_id];
+      const ref = { hierarchyId: DEFAULT_HIERARCHY_ID, populationId: child.population_id, label: child.name };
+      const fig = props.configRef.current!.figure!;
+      fig.populations = [ref];
+      fig.samplePopulations = { D2: [ref] };
+    });
+    act(() => (details.querySelector('input[type="checkbox"]') as HTMLInputElement).click());
+    act(() => create().click());
+    const [pages] = props.onAddPanelPagesToLayout.mock.calls[0];
+    expect(pages.map((page: { recipes: Array<{ populationId: string }> }) => page.recipes.map((p) => p.populationId)))
+      .toEqual([[props.state.root_population_id], [props.state.root_population_id, "child"], [props.state.root_population_id]]);
+  });
+});

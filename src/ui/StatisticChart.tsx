@@ -16,7 +16,7 @@ import { chartXAxis, xAxisFields, type ChartXAxis } from "./chart/chartXAxis";
 import { compactChartLabel, formatMeasured } from "./chart/chartFormat";
 import { ChartCategoryAxis, ChartValueAxis } from "./chart/ChartAxis";
 import { ChartPanel } from "./chart/ChartPanel";
-import { withNRows } from "./chart/chartLayout";
+import { TICK_CHAR_EM, textWidth, withNRows } from "./chart/chartLayout";
 import { ChartNRow, nLines, nRowSize, withNUnit } from "./chart/chartN";
 import { ChartHighlightNote, ChartLegend, chartLegendColumns } from "./chart/ChartLegend";
 import { arrangePanels, chartPageDimension, chartPanelDimensions, headedPanelTitle, pagePanels, panelDimensionText, placedOrOnly, type PanelTitles } from "./panelArrangement";
@@ -629,7 +629,7 @@ export function StatisticChart({
           title={
             <>
               <title>{valueTitle}</title>
-              {compactChartLabel(valueTitle, Math.max(8, Math.floor(ih / (fonts.axis * 0.6))))}
+              {compactChartLabel(valueTitle, Math.max(8, Math.floor(ih / textWidth(1, fonts.axis, TICK_CHAR_EM))))}
             </>
           }
         />

@@ -4,6 +4,7 @@
 
 import type { ReactNode } from "react";
 import { compactChartLabel } from "./chartFormat";
+import { LABEL_CHAR_EM, textWidth } from "./chartLayout";
 import { headingSizes, type PanelArrangement } from "../panelArrangement";
 
 export interface ChartPanelGridOptions {
@@ -17,7 +18,7 @@ export interface ChartPanelGridOptions {
 }
 
 function Heading({ text, width, height, font, side }: { text: string; width: number; height: number; font: number; side: "column" | "row" }) {
-  const chars = side === "row" ? Math.max(4, Math.floor((width - 8) / (font * 0.58))) : Math.max(4, Math.floor(width / (font * 0.58)));
+  const chars = side === "row" ? Math.max(4, Math.floor((width - 8) / textWidth(1, font, LABEL_CHAR_EM))) : Math.max(4, Math.floor(width / textWidth(1, font, LABEL_CHAR_EM)));
   return (
     <svg className="gl-prop-heading" data-heading={side} width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
       <text

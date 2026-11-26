@@ -77,7 +77,6 @@ import {
   type LayoutProportionsRecipe,
   isPlotLikeRecipe,
   layoutItemZoom,
-  zoomField,
   type LayoutRecipe,
   type LayoutSheet,
   type LayoutStrategyRecipe,
@@ -135,7 +134,7 @@ import { CHART_STATISTIC_LABELS, LayoutChart, chartData } from "./LayoutChart";
 import { LayoutFigureSurface, figureBlockFrame } from "./LayoutFigure";
 import { LayoutFigurePageSelect, LayoutProportionsPageSelect } from "./layout/LayoutBlockPageSelect";
 import { LayoutDimensionFields, LayoutScaleReset, LayoutSelectionGeometry, LayoutSpaceButton, useLayoutGeometryPrefs } from "./layout/LayoutGeometryControls";
-import { arrangeInGrid, arrangeUnitCount, matchSizes, resetScale, spaceItems, unitToPx } from "./layout/layoutGeometry";
+import { SMALLEST_PANEL, applyFrame, arrangeInGrid, arrangeUnitCount, blockSizing, drawingArea, matchSizes, resetScale, resizedFrame, spaceItems, unitToPx } from "./layout/layoutGeometry";
 import { LayoutProportionsPanelNote, LayoutProportionsSurface, plottingBlockSizer, proportionsSampleRefs } from "./LayoutProportions";
 import { LayoutChartQuickStart, type QuickStartChoice } from "./LayoutChartQuickStart";
 import { chartToPlottingRecipe, quickStartPlottingRecipe } from "./layoutChartConversion";
@@ -273,33 +272,6 @@ function frameOfElement(el: HTMLElement): { x: number; y: number; width: number;
 export function isBakedTitle(title: string, population: string, fileNames: readonly string[]): boolean {
   if (!population) return false;
   return fileNames.some((file) => !!file && (title === `${population} · ${file}` || title.startsWith(`${population} · ${file} · `)));
-}
-
-/** The smallest frame side a plot is drawn at (the plot's 120 px floor inside the host's inset). */
-const SMALLEST_DRAWN_PLOT = 128;
-
-/**
- * An item's zoom once resized to a frame. The zoom is kept, so a plot is drawn again to fill the
- * frame with its fonts the size they look; but a plot is never drawn smaller than it can be, so
- * one made smaller than that is drawn at that size and shown scaled to the frame. A plot held at
- * that size (`item` is its frame before the resize) is scaled back up as its frame grows, to
- * unscaled once the frame is that size again, so making it larger undoes making it smaller.
- */
-function resizedFrame(item: LayoutItem, width: number, height: number): { zoom?: number } {
-  const zoom = layoutItemZoom(item);
-  if (item.recipe.kind !== "biplot" && item.recipe.kind !== "histogram") return zoomField(zoom);
-  const fits = Math.min(width, height) / SMALLEST_DRAWN_PLOT;
-  const held = zoom < 1 && Math.min(item.width, item.height) / zoom <= SMALLEST_DRAWN_PLOT + 1;
-  return zoomField(held ? Math.min(1, fits) : Math.min(zoom, fits));
-}
-
-/**
- * Whether an item is drawn at one size and scaled as a whole to its frame, as a multi-population
- * strategy block is. Such a frame keeps its proportions when it is resized: one of another shape
- * would only stand empty beside the block, its handles far from what is drawn.
- */
-export function scaledAsAWhole(recipe: LayoutRecipe): boolean {
-  return recipe.kind === "strategy" && !!recipe.populationIds?.length;
 }
 
 function itemTitle(
@@ -703,8 +675,7 @@ function LayoutPlotSurface({
         return;
       }
       host.className = "gl-layout-plot-host";
-      const availableWidth = Math.max(120, item.width - 8);
-      const availableHeight = Math.max(120, item.height - 8);
+      const { width: availableWidth, height: availableHeight } = drawingArea(item);
 
       if (recipe.kind === "strategy" && recipe.populationIds?.length) {
         // The Strategy tab's multi-population grid, as a block: every step to each population,
@@ -736,7 +707,7 @@ function LayoutPlotSurface({
         const arrows = showArrows ? strategyArrows(nodes, tree.populations) : [];
         const gap = showArrows ? strategyArrowGap(arrows) : 8;
         const rowGap = showArrows ? strategyArrowRowGap(arrows) : 8;
-        const plotSize = Math.max(120, Math.min(800, recipe.plotSize ?? 200));
+        const plotSize = Math.max(SMALLEST_PANEL, Math.min(800, recipe.plotSize ?? 200));
         host.removeAttribute("id");
         const inner = document.createElement("div");
         inner.id = `layout-strategy-${item.id}`;
@@ -822,21 +793,18 @@ function LayoutPlotSurface({
         const stepCount = Math.max(1, steps.length);
         // A strip sent from the Strategy tab keeps the columns it had there.
         const keptColumns = recipe.columns ? Math.min(recipe.columns, stepCount) : 0;
-        // The frame's own size, not held at 120 px as a plot's is: a strip in a frame smaller than
-        // that fits it shown scaled (below), where held at 120 it was drawn larger and scrolled.
-        const stripWidth = Math.max(1, item.width - 8), stripHeight = Math.max(1, item.height - 8);
         let columns = 1, plotSize = 0;
         for (let candidate = keptColumns || 1; candidate <= (keptColumns || stepCount); candidate++) {
           const rows = Math.ceil(stepCount / candidate);
-          const cellWidth = Math.floor((stripWidth - gap * (candidate - 1)) / candidate);
-          const cellHeight = Math.floor((stripHeight - titleHeight - gap * (rows - 1)) / rows);
+          const cellWidth = Math.floor((availableWidth - gap * (candidate - 1)) / candidate);
+          const cellHeight = Math.floor((availableHeight - titleHeight - gap * (rows - 1)) / rows);
           const size = Math.min(cellWidth, cellHeight);
           if (size > plotSize) { plotSize = size; columns = candidate; }
         }
-        // The renderer draws no panel under 120 px: a strip whose panels fit smaller is drawn at 120
+        // The renderer draws no panel under its smallest: a strip whose panels fit smaller is drawn at that
         // and its grid shown scaled to fit, so it never scrolls inside its frame.
-        const shownAt = plotSize < 120 ? Math.max(1, plotSize) / 120 : 1;
-        plotSize = Math.max(120, Math.min(800, plotSize));
+        const shownAt = plotSize < SMALLEST_PANEL ? Math.max(1, plotSize) / SMALLEST_PANEL : 1;
+        plotSize = Math.max(SMALLEST_PANEL, Math.min(800, plotSize));
         const payload = buildPooledStrategyPayload(
           pooled ? pooled.drawn.map((member) => ({ sample: member.sample, finalMask: null })) : [{ sample: source.sample, finalMask: null }],
           steps,
@@ -872,7 +840,7 @@ function LayoutPlotSurface({
         return;
       }
 
-      const plotSize = Math.max(120, Math.min(availableWidth, availableHeight));
+      const plotSize = Math.max(SMALLEST_PANEL, Math.min(availableWidth, availableHeight));
       const yChannel = recipe.kind === "histogram" ? null : recipe.yChannel;
       // Overlaid histograms fill where they overlap as the Illustration tab did when the plot was sent.
       const histOverlayMode = recipe.kind === "histogram" && recipe.histOverlayMode ? recipe.histOverlayMode : "front_opaque";
@@ -1193,8 +1161,7 @@ function LayoutItemFrame({
           sources={sources}
           state={state}
           globalScales={globalScales}
-          width={Math.max(120, inner.width - 8)}
-          height={Math.max(80, inner.height - 8)}
+          {...drawingArea(inner)}
           columnLevels={metadataLevels}
           containerId={`layout-figure-${item.id}`}
         />
@@ -1205,8 +1172,7 @@ function LayoutItemFrame({
           state={state}
           metadataById={metadataById}
           divisionProfiles={divisionProfiles}
-          width={Math.max(120, inner.width - 8)}
-          height={Math.max(80, inner.height - 8)}
+          {...drawingArea(inner)}
           containerId={`layout-proportions-${item.id}`}
           globalScales={globalScales}
           chartFiles={chartFiles}
@@ -1223,8 +1189,7 @@ function LayoutItemFrame({
           <LayoutCellPanelLazy
             recipe={item.recipe}
             service={imageService ?? null}
-            width={Math.max(120, inner.width - 8)}
-            height={Math.max(80, inner.height - 8)}
+            {...drawingArea(inner)}
           />
         </Suspense>
       ) : item.recipe.kind === "imagewall" ? (
@@ -1232,8 +1197,7 @@ function LayoutItemFrame({
           <LayoutImageWallLazy
             recipe={item.recipe}
             service={imageService ?? null}
-            width={Math.max(120, inner.width - 8)}
-            height={Math.max(80, inner.height - 8)}
+            {...drawingArea(inner)}
           />
         </Suspense>
       ) : item.recipe.kind === "chart" ? (
@@ -1242,8 +1206,7 @@ function LayoutItemFrame({
             data={chart!}
             recipe={item.recipe}
             style={style}
-            width={Math.max(120, inner.width - 8)}
-            height={Math.max(80, inner.height - 8)}
+            {...drawingArea(inner)}
             title={item.recipe.title?.trim() || itemTitle(item, samples, state)}
           />
         </div>
@@ -1945,7 +1908,7 @@ export function LayoutTab({
     const base = latestWorkspaceRef.current;
     const next = cloneLayoutWorkspace(base);
     const item = next.sheets.find(({ id }) => id === next.activeSheetId)?.items.find(({ id }) => id === templateId);
-    if (!item || !scaledAsAWhole(item.recipe) || width < 1 || height < 1) return;
+    if (!item || !blockSizing(item.recipe).scaledWhole || width < 1 || height < 1) return;
     if (item.width - width <= 2 && item.height - height <= 2) return;
     // The block is drawn at the top of its frame, centred across it.
     item.x += Math.round((item.width - Math.min(item.width, width)) / 2);
@@ -2557,11 +2520,7 @@ export function LayoutTab({
       moveHiddenGroupMembers(sheet, frames);
       for (const item of sheet.items) {
         const frame = frames[item.id];
-        if (!frame) continue;
-        const { zoom } = resizedFrame(item, frame.width, frame.height);
-        Object.assign(item, frame);
-        if (zoom === undefined) delete item.zoom;
-        else item.zoom = zoom;
+        if (frame) applyFrame(item, frame);
       }
     });
   };
@@ -3497,19 +3456,15 @@ export function LayoutTab({
                   <LayoutDimensionFields
                     item={selectedItem}
                     prefs={geometry}
-                    ratioLocked={scaledAsAWhole(selectedItem.recipe)}
+                    ratioLocked={blockSizing(selectedItem.recipe).scaledWhole}
                     origin={pageOriginAt(activeSheet.page, selectedItem.x + selectedItem.width / 2, selectedItem.y + selectedItem.height / 2)}
                     onCommit={(patch) =>
                       mutateActiveSheet((sheet) => {
                         const item = sheet.items.find(
                           (item) => item.id === selectedItem.id,
                         );
-                        if (!item) return;
                         // A typed size is shown scaled below the smallest a plot is drawn, as a dragged one is.
-                        const { zoom } = resizedFrame(item, patch.width ?? item.width, patch.height ?? item.height);
-                        Object.assign(item, patch);
-                        if (zoom === undefined) delete item.zoom;
-                        else item.zoom = zoom;
+                        if (item) applyFrame(item, patch);
                       })
                     }
                   />
@@ -4801,7 +4756,7 @@ export function LayoutTab({
                 // Double-click on a member of a selected group takes the member alone, as Excalidraw and Penpot do.
                 onIsolate={item.group && selectedIds.includes(item.id) && selectedIds.length > 1 ? () => setSelectedIds([item.id]) : undefined}
                 // Not on an iterated sheet, where one frame is drawn for several files whose blocks differ.
-                onHug={iteration.mode === "off" && item.id === item.templateId && scaledAsAWhole(item.recipe) ? (width, height) => hugFrame(item.templateId, width, height) : undefined}
+                onHug={iteration.mode === "off" && item.id === item.templateId && blockSizing(item.recipe).scaledWhole ? (width, height) => hugFrame(item.templateId, width, height) : undefined}
                 // The block stays selected and the page takes the keyboard back.
                 onTextEditEnd={() => { setEditingTextId((current) => (current === item.id ? null : current)); canvasRef.current?.focus({ preventScroll: true }); }}
               />
@@ -4822,7 +4777,7 @@ export function LayoutTab({
                 // inspector edit moves an item by its style, so the targets are watched for that.
                 useMutationObserver
                 useResizeObserver
-                keepRatio={(selectedItems.some((item) => scaledAsAWhole(item.recipe)) || geometry.keepRatio !== modifiers.shift) && !selectedItems.some((item) => item.recipe.kind === "shape" && item.recipe.shape === "line")}
+                keepRatio={(selectedItems.some((item) => blockSizing(item.recipe).scaledWhole) || geometry.keepRatio !== modifiers.shift) && !selectedItems.some((item) => item.recipe.kind === "shape" && item.recipe.shape === "line")}
                 throttleDragRotate={modifiers.shift ? 45 : 0}
                 snappable={!modifiers.meta}
                 snapThreshold={6}

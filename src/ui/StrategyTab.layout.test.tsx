@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { StrategyTab } from "./StrategyTab";
+import { STRATEGY_PAGE_PADDING, StrategyTab, type StrategyConfig } from "./StrategyTab";
 import { clearPersistedTabState } from "./tabState";
 import { I18nProvider } from "./i18n";
 import { initialCoreState, type CoreState, type Derived } from "../store";
@@ -162,11 +162,13 @@ describe("the box the strategy is drawn in", () => {
     expect(/\.gl-plotting-filelist \{[^}]*max-height: max\(160px, 40vh\);/.test(css)).toBe(true);
   });
 
-  // Beside the side tabs the figure column can be narrow; its heading stays one line, shortened.
-  it("keeps the heading on one line, the names shortened with an ellipsis", () => {
+  // Beside the side tabs the figure column can be narrow; what is drawn is named on one line
+  // after the status, shortened before the status is.
+  it("names the file and the tree on the status line, shortened with an ellipsis", () => {
     const css = readFileSync("src/styles.css", "utf8");
-    expect(/\.gl-strategy-workspace \.gl-plotting-head \{[^}]*white-space: nowrap;/.test(css)).toBe(true);
-    expect(/\.gl-strategy-workspace \.gl-plotting-head > span \{[^}]*text-overflow: ellipsis;/.test(css)).toBe(true);
+    expect(/\.gl-strategy-status > span \{[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/.test(css)).toBe(true);
+    // No header row: the tab's one grid row is the side pane beside the strategy.
+    expect(/\.gl-plotting-workspace\.gl-strategy-workspace \{ grid-template-rows: minmax\(0, 1fr\); \}/.test(css)).toBe(true);
   });
 });
 
@@ -221,7 +223,7 @@ describe("the Strategy tab and the Layout tab", () => {
     expect(cells).toHaveLength(2);
     act(() => { cells[1].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
     expect(menuItems().map((b) => b.textContent)).toEqual([
-      "Add the strategy to the Layout tab", "Add this plot to the Layout tab", "Show this step on the Gating tab", "Fit data + gates", "Export PNG", "Export SVG", "Export PDF",
+      "Add the strategy to the Layout tab", "Add this plot to the Layout tab", "Show this step on the Gating tab", "Fit data + gates", "Export PNG", "Export SVG", "Export PDF", "Text sizes…",
     ]);
     // The second step shows the lymphocytes on the B cell gate's channels.
     act(() => menuItem("Add this plot to the Layout tab")!.click());
@@ -239,7 +241,7 @@ describe("the Strategy tab and the Layout tab", () => {
     );
     // Away from a cell, the menu offers the strip and the exports but no step.
     act(() => { host.querySelector<HTMLElement>("#strategy-grid-container")!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 40 })); });
-    expect(menuItems().map((b) => b.textContent)).toEqual(["Add the strategy to the Layout tab", "Fit data + gates", "Export PNG", "Export SVG", "Export PDF"]);
+    expect(menuItems().map((b) => b.textContent)).toEqual(["Add the strategy to the Layout tab", "Fit data + gates", "Export PNG", "Export SVG", "Export PDF", "Text sizes…"]);
     // A panel of the multi-population grid has the renderer's own right-click handler, which stops
     // the event; the tab's menu opens all the same, and the renderer's does not.
     act(() => { document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })); });
@@ -394,9 +396,10 @@ describe("the Strategy tab's controls", () => {
     expect(shown()[0].textContent).toContain("Gate edges");
     open("Export");
     expect(shown()[0].textContent).toContain("With gating tree");
-    expect([...shown()[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["PNG", "SVG", "PDF"]);
-    // Add to Layout is in the tab's header row, as on the Illustration and Plotting tabs.
-    expect([...host.querySelectorAll(".gl-plotting-head .gl-plotting-head-actions button")].map((b) => b.textContent)).toEqual(["Add to Layout"]);
+    // Add to Layout is under Export, as on the Illustration and Plotting tabs, and the tab has no header row.
+    expect([...shown()[0].querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Add to Layout", "PNG", "SVG", "PDF"]);
+    expect([...shown()[0].querySelectorAll("h3")].map((h) => h.textContent)).toEqual(["To the Layout tab", "Export"]);
+    expect(host.querySelector(".gl-plotting-head")).toBeNull();
     expect(shown()).toHaveLength(1);
     // The old stacked rows and the Appearance fold are gone.
     expect(host.querySelector(".gl-strategy-controls")).toBeNull();
@@ -436,18 +439,23 @@ describe("Fit to columns", () => {
     ));
     act(() => observed!([{ contentRect: { width: 608 } }]));
     await flush();
-    const drawn = () => renderer.renderStrategyGrid.mock.calls.at(-1)![1] as { plot_size: number; fit_to_columns: boolean; steps: unknown[] };
+    const drawn = () => renderer.renderStrategyGrid.mock.calls.at(-1)![1] as { plot_size: number; n_columns: number; fit_to_columns: boolean; steps: unknown[] };
     // One step fills the width, up to the cap, rather than drawing one 200 px panel in it.
     expect(drawn().steps).toHaveLength(1);
     expect(drawn().plot_size).toBe(500);
-    // The full path to B cells is two steps: two columns of (608 - 8 - 8) / 2 px, not four of 200.
+    // The renderer makes its grid as wide as the columns it is given, so it is given the one
+    // drawn, not the four allowed: the page, and the grip in its corner, end at the plot.
+    expect(drawn().n_columns).toBe(1);
+    // The full path to B cells is two steps: two columns, not four of 200 px, in the width less
+    // the page's margins, (608 - 8 - 2 × 14 - 8) / 2 px each.
     const fullPath = [...host.querySelectorAll<HTMLLabelElement>("label")].find((label) => label.textContent === "Full path from root")!.querySelector("input")!;
     act(() => fullPath.click());
     await flush();
     expect(drawn().steps).toHaveLength(2);
-    expect(drawn().plot_size).toBe(296);
+    expect(drawn().plot_size).toBe(282);
+    expect(drawn().n_columns).toBe(2);
     expect(drawn().fit_to_columns).toBe(false);
-    expect(host.textContent).toContain("drawn at 296 px");
+    expect(host.textContent).toContain("drawn at 282 px");
 
     // A wide figure area is capped.
     act(() => observed!([{ contentRect: { width: 2000 } }]));
@@ -463,6 +471,59 @@ describe("Fit to columns", () => {
     await flush();
     expect(drawn().plot_size).toBe(250);
     expect(host.textContent).not.toContain("drawn at");
+    // More columns allowed than there are steps: the grid is still the two drawn.
+    expect(drawn().n_columns).toBe(2);
+  });
+
+  // The grid of several populations has its own margins: 4 px at the left and, at the right, the
+  // gutter its arrows run in. Fitted, the page with that grid on it is no wider than the box, so
+  // the grip in the page's corner is in view.
+  it("fits the grid of several populations, its arrows' gutter and the page's margins into the width", async () => {
+    const fx = fixture();
+    // Lymphocytes holds every event, so the panel its events are drawn on is there.
+    const derived = { masks: { [fx.lymphId]: Uint8Array.from([1, 1, 1]) } } as unknown as Derived;
+    let observed: ((entries: { contentRect: { width: number } }[]) => void) | null = null;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: (entries: { contentRect: { width: number } }[]) => void) { observed = callback; }
+      observe() {}
+      disconnect() {}
+    });
+    act(() => root.render(
+      <I18nProvider>
+        <StrategyTab
+          state={fx.state as CoreState}
+          sample={fx.files[0].sample}
+          sampleName="D1.fcs"
+          derived={derived}
+          globalScales={{}}
+          configRef={{ current: null }}
+          dataRevision={0}
+          densityColorPower={1}
+          onDensityColorPowerChange={vi.fn()}
+          onFitChannels={vi.fn()}
+          files={fx.files}
+          poolIds={null}
+          checkedSampleIds={[]}
+          onViewFile={vi.fn()}
+          activeSampleId="D1"
+        />
+      </I18nProvider>,
+    ));
+    act(() => observed!([{ contentRect: { width: 700 } }]));
+    await flush();
+    act(() => [...host.querySelectorAll<HTMLLabelElement>("label")].find((l) => l.textContent?.includes("Multiple pops"))!.querySelector("input")!.click());
+    await flush();
+    act(() => [...host.querySelectorAll<HTMLButtonElement>(".gl-strategy-pops button")].find((b) => b.textContent === "All")!.click());
+    await flush();
+    const drawn = renderer.renderMultiStrategyGrid.mock.calls.at(-1)![1] as { plot_size: number; grid_gap: number; nodes: { col: number }[] };
+    // Two panels side by side, an arrow from the first to the second.
+    const columns = Math.max(...drawn.nodes.map((node) => node.col)) + 1;
+    expect(columns).toBe(2);
+    expect(drawn.grid_gap).toBeGreaterThan(8);
+    const page = 2 * STRATEGY_PAGE_PADDING + 4 + columns * drawn.plot_size + (columns - 1) * drawn.grid_gap + drawn.grid_gap;
+    expect(page).toBeLessThanOrEqual(700);
+    // And no narrower than the whole pixels of two columns allow.
+    expect(page).toBeGreaterThan(700 - columns);
   });
 });
 
@@ -531,5 +592,130 @@ describe("choosing several populations", () => {
     expect(rows.map((row) => row.querySelector("input")!.checked)).toEqual([true, true]);
     pick("None");
     expect(rows.map((row) => row.querySelector("input")!.checked)).toEqual([false, false]);
+  });
+});
+
+describe("the strategy's corner grip", () => {
+  const strategy = (fx: ReturnType<typeof fixture>, state: CoreState, configRef: { current: StrategyConfig | null }) => (
+    <I18nProvider>
+      <StrategyTab
+        state={state}
+        sample={fx.files[0].sample}
+        sampleName="D1.fcs"
+        derived={{ masks: {} } as Derived}
+        globalScales={{}}
+        configRef={configRef}
+        dataRevision={0}
+        densityColorPower={1}
+        onDensityColorPowerChange={vi.fn()}
+        onFitChannels={vi.fn()}
+        files={fx.files}
+        poolIds={null}
+        checkedSampleIds={[]}
+        onViewFile={vi.fn()}
+        activeSampleId="D1"
+      />
+    </I18nProvider>
+  );
+  const pointer = (type: string, target: EventTarget, x: number, y: number) =>
+    act(() => { target.dispatchEvent(new MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y })); });
+  const sized = () => {
+    const page = host.querySelector<HTMLElement>(".gl-strategy-page")!;
+    page.getBoundingClientRect = () => ({ left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400, x: 0, y: 0, toJSON: () => ({}) });
+    return page;
+  };
+
+  it("sets Plot size on release, stretching the page while dragged; Escape cancels; a double-click fits the columns", async () => {
+    const fx = fixture();
+    const configRef = { current: null as StrategyConfig | null };
+    act(() => root.render(strategy(fx, fx.state as CoreState, configRef)));
+    await flush();
+    expect(configRef.current).toMatchObject({ plotSize: 200, fitToColumns: true });
+    const page = sized();
+    // Half as wide again: the page is stretched by 1.5 while dragged, the plots 200 → 300 px on release.
+    pointer("pointerdown", host.querySelector<HTMLElement>(".gl-strategy-page > .gl-figure-resize")!, 600, 400);
+    pointer("pointermove", window, 900, 410);
+    expect(page.style.transform).toBe("scale(1.5)");
+    expect(host.textContent).toContain("Plot size 300 px");
+    pointer("pointerup", window, 900, 410);
+    await flush();
+    expect(page.style.transform).toBe("");
+    // A size dragged is the size wanted, as one typed is: Fit to columns goes off with it.
+    expect(configRef.current).toMatchObject({ plotSize: 300, fitToColumns: false });
+    expect((renderer.renderStrategyGrid.mock.calls.at(-1)![1] as { plot_size: number }).plot_size).toBe(300);
+
+    // Escape leaves the size as it was.
+    sized();
+    pointer("pointerdown", host.querySelector<HTMLElement>(".gl-strategy-page > .gl-figure-resize")!, 600, 400);
+    pointer("pointermove", window, 300, 400);
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+    pointer("pointerup", window, 300, 400);
+    await flush();
+    expect(configRef.current).toMatchObject({ plotSize: 300, fitToColumns: false });
+
+    // The plots never go under the renderer's smallest panel or over the Plot size field's largest.
+    sized();
+    pointer("pointerdown", host.querySelector<HTMLElement>(".gl-strategy-page > .gl-figure-resize")!, 600, 400);
+    pointer("pointermove", window, 60, 400);
+    expect(host.textContent).toContain("Plot size 120 px");
+    pointer("pointermove", window, 3000, 400);
+    expect(host.textContent).toContain("Plot size 500 px");
+    act(() => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })); });
+
+    act(() => { host.querySelector<HTMLElement>(".gl-strategy-page > .gl-figure-resize")!.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); });
+    await flush();
+    expect(configRef.current).toMatchObject({ plotSize: 300, fitToColumns: true });
+  });
+
+  it("is not shown while there is no strategy drawn", async () => {
+    const fx = fixture();
+    // The root has no gates to trace.
+    act(() => root.render(strategy(fx, { ...fx.state, active_population_id: fx.rootId } as CoreState, { current: null })));
+    await flush();
+    expect(host.querySelector("#strategy-grid-container")!.getAttribute("data-state")).toBe("empty");
+    expect(host.querySelector(".gl-figure-resize")).toBeNull();
+  });
+
+  // The renderer empties its container at every draw, so the grip lives beside it; and it asks its
+  // container to scroll, which the box around the page does instead.
+  it("lives beside the renderer's container, on the page inside the box that scrolls", async () => {
+    const fx = fixture();
+    act(() => root.render(strategy(fx, fx.state as CoreState, { current: null })));
+    await flush();
+    const container = host.querySelector<HTMLElement>("#strategy-grid-container")!;
+    expect(container.querySelector(".gl-figure-resize")).toBeNull();
+    const page = container.parentElement!;
+    expect(page.classList.contains("gl-strategy-page")).toBe(true);
+    expect(page.querySelector(":scope > .gl-figure-resize")).not.toBeNull();
+    expect(page.parentElement!.classList.contains("gl-mini-grid-container")).toBe(true);
+    const css = readFileSync("src/styles.css", "utf8");
+    expect(/\.gl-strategy-page > #strategy-grid-container \{[^}]*overflow: visible !important;/.test(css)).toBe(true);
+  });
+
+  // Reported from the dev server: with one step drawn the grip sat at the far right of the pane,
+  // and the white box ran on below the plot and the grip. The page is as wide and as tall as
+  // what is drawn on it, it is the white the strategy is seen on, and the grip is in its corner.
+  it("sits in the corner of a white page as wide and as tall as the strategy drawn", async () => {
+    const fx = fixture();
+    act(() => root.render(strategy(fx, fx.state as CoreState, { current: null })));
+    await flush();
+    const page = host.querySelector<HTMLElement>(".gl-strategy-page")!;
+    expect(page.classList.contains("is-drawn")).toBe(true);
+    const css = readFileSync("src/styles.css", "utf8");
+    // The page takes its content's width, and the grip's place is the page's corner (figure.css).
+    expect(/\.gl-strategy-page \{[^}]*position: relative;[^}]*width: max-content;/.test(css)).toBe(true);
+    expect(/\.gl-figure-resize \{[^}]*position: absolute; right: 3px; bottom: 3px;/.test(readFileSync("src/ui/figure.css", "utf8"))).toBe(true);
+    // The page is the white, with the margin Fit to columns leaves room for; the box around it is not.
+    const drawn = /\.gl-strategy-page\.is-drawn \{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(drawn).toMatch(/background: #fff;/);
+    expect(drawn).toContain(`padding: ${STRATEGY_PAGE_PADDING}px;`);
+    expect(/\.gl-mini-grid-container\.gl-strategy-viewport \{[^}]*background: transparent;[^}]*border: 0;/.test(css)).toBe(true);
+  });
+
+  it("leaves a note that nothing is drawn off the page", async () => {
+    const fx = fixture();
+    act(() => root.render(strategy(fx, { ...fx.state, active_population_id: fx.rootId } as CoreState, { current: null })));
+    await flush();
+    expect(host.querySelector(".gl-strategy-page")!.classList.contains("is-drawn")).toBe(false);
   });
 });

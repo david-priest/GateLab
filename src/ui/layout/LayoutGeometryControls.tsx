@@ -8,10 +8,10 @@ import { layoutItemZoom, type LayoutItem } from "../../engine/layout";
 import { useI18n } from "../i18n";
 import { NumberField } from "../NumberField";
 import {
+  blockSizing,
   defaultGridColumns,
   framePatch,
   pxToUnit,
-  typedMinimum,
   unitToPx,
   type FrameField,
   type GridOrder,
@@ -53,7 +53,7 @@ export function LayoutDimensionFields({
   const { t } = useI18n();
   const { unit, setUnit, setKeepRatio } = prefs;
   const keepRatio = prefs.keepRatio || ratioLocked;
-  const minimum = typedMinimum(item.recipe.kind);
+  const { minimum } = blockSizing(item.recipe);
   const shift = (name: FrameField) => (name === "x" ? origin.x : name === "y" ? origin.y : 0);
   const field = (name: FrameField) => (
     <label key={name}>

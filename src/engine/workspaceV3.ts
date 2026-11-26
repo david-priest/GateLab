@@ -174,6 +174,10 @@ const WORKSPACE_V3_ALLOWED_KEYS = [
   // Why each tailored gate was tailored, as the user gave it (reports/tailoringReport.ts). Text
   // only: nothing in gating reads it.
   "tailoringReasons",
+  // The gating saved by name, to return to (gatingStates.ts, Workspace → Gating states…). Read
+  // back by readGatingStates; nothing in this workspace's gating reads it. Left off this list, a
+  // workspace with a compensation profile and a saved state refused to reopen (2026-11-26).
+  "gatingStates",
 ] as const;
 
 const SAMPLE_V3_REQUIRED_KEYS = ["fileName", "dataPath", "logicleW", "assay"] as const;

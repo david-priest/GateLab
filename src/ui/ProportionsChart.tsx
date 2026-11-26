@@ -20,6 +20,7 @@ import type { ProportionsSettings } from "../engine/proportionsModel";
 import { PROPORTIONS_NO_FACTOR, PROPORTIONS_SAMPLE_FACTOR } from "../engine/proportionsSettings";
 import { arrangePanels, chartPageDimension, chartPanelDimensions, headedPanelTitle, pagePanels, panelDimensionText, placedOrOnly } from "./panelArrangement";
 import { chartGridCells } from "./chart/ChartPanelGrid";
+import { panelTitleShown } from "./chart/ChartPanel";
 import type { LayoutProportionsPanel } from "../engine/layout";
 import { columnValueOrder } from "../engine/levelOrder";
 import { formatMeasured, summariseStatistic } from "./StatisticChart";
@@ -655,12 +656,16 @@ export function ProportionsChart({
             fontWeight={600}
             fill="#334155"
           >
-            {placed.headings
-              ? headedPanelTitle(panelValues({ facet, cat: boxCat }), panelDimensions, placed.headings, { facet: facetTitle })
-              : [
-                  boxCat !== undefined ? catLevels[boxCat] : null,
-                  hasFacet ? (facetTitle ? `${facetTitle}: ${facet || "(NA)"}` : facet || "(NA)") : null,
-                ].filter(Boolean).join(" · ")}
+            {panelTitleShown(
+              placed.headings
+                ? headedPanelTitle(panelValues({ facet, cat: boxCat }), panelDimensions, placed.headings, { facet: facetTitle })
+                : [
+                    boxCat !== undefined ? catLevels[boxCat] : null,
+                    hasFacet ? (facetTitle ? `${facetTitle}: ${facet || "(NA)"}` : facet || "(NA)") : null,
+                  ].filter(Boolean).join(" · "),
+              PW,
+              fonts.title ?? fonts.axis,
+            )}
           </text>
         )}
         {/* y grid + axis (percent) */}

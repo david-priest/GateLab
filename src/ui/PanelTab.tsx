@@ -29,6 +29,10 @@ interface Props {
   /** How channels are named on axes and pickers, app-wide. */
   labelMode: ChannelLabelMode;
   onLabelModeChange: (mode: ChannelLabelMode) => void;
+  /** Opens the antibody titration review; absent where it cannot run (an SCE host). */
+  onReviewTitration?: () => void;
+  /** Why the titration review has nothing to read, shown on the disabled button; absent when it can open. */
+  titrationUnavailable?: string;
 }
 
 interface ImportDraft {
@@ -45,6 +49,8 @@ export function PanelTab({
   onResetAll,
   onWriteToHost,
   hostWriteBusy = false,
+  onReviewTitration,
+  titrationUnavailable,
 }: Props) {
   const { t } = useI18n();
   const intro = useTabIntro("panel");
@@ -142,6 +148,17 @@ export function PanelTab({
           <button type="button" className="gl-btn-ghost" onClick={onResetAll} disabled={!anyRenamed}>
             {t("Reset all")}
           </button>
+          {onReviewTitration && (
+            <button
+              type="button"
+              className="gl-btn-ghost"
+              onClick={onReviewTitration}
+              disabled={!!titrationUnavailable}
+              title={titrationUnavailable ?? t("Compare stained tubes of each antibody at several concentrations: stain index, replicates and the working concentration")}
+            >
+              {t("Review titration…")}
+            </button>
+          )}
           {onWriteToHost && (
             <button
               type="button"

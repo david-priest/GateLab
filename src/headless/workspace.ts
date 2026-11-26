@@ -86,12 +86,52 @@ function readSample(bytes: Uint8Array, declaredName: string, notes: string[]): S
   }
 }
 
+/** A workspace reopened: the restored files, the store loaded with its trees, and what was said. */
+export interface OpenedWorkspace {
+  /** The workspace as validated, with any channel key the files now read differently restated in its gates. */
+  workspace: LiveWorkspaceFile;
+  /** The workspace JSON as the file holds it, before migration or validation. */
+  saved: unknown;
+  storage: "bundle" | "reference";
+  /** One per declared sample, in the workspace's order. */
+  samples: Sample[];
+  /** Each sample's id in the store (its saved sampleId), in the same order. */
+  fileIds: string[];
+  state: CoreState;
+  /** Saved channel keys restated to the keys the files read now (workspaceChannelKeys.ts). */
+  channelKeyRemap: ReadonlyMap<string, string>;
+  /** Notes for every file. */
+  notes: string[];
+}
+
 /**
  * Reopen a .gatelab workspace and return each of its files with the tree it is gated under. A
  * linked (reference) workspace takes its FCS files from `fcs`, matched by name and recorded
  * acquisition as the app relinks them; a portable bundle carries its own and takes none.
  */
 export async function openWorkspace(bytes: Uint8Array, workspacePath: string, fcs: readonly FcsInput[], opts: Pick<OpenOptions, "instrument"> = {}): Promise<GatedFile[]> {
+  const { workspace: ws, storage, samples, fileIds, state, notes } = await openWorkspaceState(bytes, workspacePath, fcs, opts);
+  return ws.samples.map((wss, index) => {
+    const hierarchyId = fileHierarchyId(state.file_hierarchies[fileIds[index]], state.hierarchies);
+    const hierarchy = state.hierarchies.find((h) => h.id === hierarchyId);
+    const tree = treeOf(state, hierarchyId);
+    const fileNotes = [...notes];
+    if (!tree) fileNotes.push(`${wss.fileName} is gated under "${hierarchy?.name ?? hierarchyId}", which holds no tree.`);
+    return {
+      file: wss.fileName,
+      sample: samples[index],
+      tree: tree ?? { gates: {}, gate_order: [], populations: {}, root_population_id: "" },
+      hierarchy: hierarchy?.name ?? hierarchyId,
+      source: { kind: "gatelab" as const, detail: `GateLab workspace ${workspacePath} (${storage === "bundle" ? "portable" : "linked FCS"})` },
+      notes: fileNotes,
+      refusals: [],
+      compensation: { enabled: samples[index].compensationEnabled, resolution: "as saved" },
+    };
+  });
+}
+
+/** openWorkspace's steps, up to the store loaded with the workspace's trees. */
+export async function openWorkspaceState(bytes: Uint8Array, workspacePath: string, fcs: readonly FcsInput[], opts: Pick<OpenOptions, "instrument"> = {}): Promise<OpenedWorkspace> {
   const envelope = readWorkspaceEnvelope(bytes);
   const raw = envelope.raw;
   const rawVersion = raw != null && typeof raw === "object" ? (raw as { version?: unknown }).version : undefined;
@@ -274,21 +314,5 @@ export async function openWorkspace(bytes: Uint8Array, workspacePath: string, fc
     file_groups: fileGroups,
   });
 
-  return ws.samples.map((wss, index) => {
-    const hierarchyId = fileHierarchyId(state.file_hierarchies[fileIds[index]], state.hierarchies);
-    const hierarchy = state.hierarchies.find((h) => h.id === hierarchyId);
-    const tree = treeOf(state, hierarchyId);
-    const fileNotes = [...notes];
-    if (!tree) fileNotes.push(`${wss.fileName} is gated under "${hierarchy?.name ?? hierarchyId}", which holds no tree.`);
-    return {
-      file: wss.fileName,
-      sample: samples[index],
-      tree: tree ?? { gates: {}, gate_order: [], populations: {}, root_population_id: "" },
-      hierarchy: hierarchy?.name ?? hierarchyId,
-      source: { kind: "gatelab" as const, detail: `GateLab workspace ${workspacePath} (${storage === "bundle" ? "portable" : "linked FCS"})` },
-      notes: fileNotes,
-      refusals: [],
-      compensation: { enabled: samples[index].compensationEnabled, resolution: "as saved" },
-    };
-  });
+  return { workspace: ws, saved: raw, storage, samples, fileIds, state, channelKeyRemap: remap, notes };
 }

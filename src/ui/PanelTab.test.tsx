@@ -133,3 +133,32 @@ describe("PanelTab locked channels and its explanation", () => {
     expect(host.textContent).toContain(text);
   });
 });
+
+describe("PanelTab titration review", () => {
+  const render = (props: { onReviewTitration?: () => void; titrationUnavailable?: string }) =>
+    act(() => root.render(
+      <I18nProvider>
+        <PanelTab sample={sample} onRename={vi.fn()} onRenameMany={vi.fn()} onResetAll={vi.fn()} labelMode="marker" onLabelModeChange={vi.fn()} {...props} />
+      </I18nProvider>,
+    ));
+  const button = () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Review titration…");
+
+  it("opens the review from the Panel tab", () => {
+    const onReviewTitration = vi.fn();
+    render({ onReviewTitration });
+    expect(button()!.disabled).toBe(false);
+    act(() => button()!.click());
+    expect(onReviewTitration).toHaveBeenCalledTimes(1);
+  });
+
+  it("is shown disabled, saying why, when no flow file is loaded", () => {
+    render({ onReviewTitration: vi.fn(), titrationUnavailable: "The titration review reads flow cytometry files, and none is loaded." });
+    expect(button()!.disabled).toBe(true);
+    expect(button()!.title).toBe("The titration review reads flow cytometry files, and none is loaded.");
+  });
+
+  it("is absent where the review cannot run", () => {
+    render({});
+    expect(button()).toBeUndefined();
+  });
+});

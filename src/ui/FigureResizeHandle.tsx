@@ -27,12 +27,14 @@ interface Props {
   onCommit: (size: number) => void;
   /** Double-click: the scale that fits the page to the preview's width. */
   fitScale: () => number | null;
+  /** Double-click, where the tab has its own way to fit the page to the width: taken in place of fitScale. */
+  onFit?: () => void;
   disabled?: boolean;
 }
 
 const clamp = (value: number, [lo, hi]: readonly [number, number]) => Math.max(lo, Math.min(hi, value));
 
-export function FigureResizeHandle({ page, size, range, sizeLabel, onPreview, onCommit, fitScale, disabled = false }: Props) {
+export function FigureResizeHandle({ page, size, range, sizeLabel, onPreview, onCommit, fitScale, onFit, disabled = false }: Props) {
   const { t } = useI18n();
   const [shown, setShown] = useState<number | null>(null);
   const drag = useRef<{ stop: () => void } | null>(null);
@@ -90,6 +92,10 @@ export function FigureResizeHandle({ page, size, range, sizeLabel, onPreview, on
         onMouseDown={(event) => event.stopPropagation()}
         onDoubleClick={(event) => {
           event.stopPropagation();
+          if (onFit) {
+            onFit();
+            return;
+          }
           const scale = fitScale();
           if (scale && sized(scale) !== size) onCommit(sized(scale));
         }}

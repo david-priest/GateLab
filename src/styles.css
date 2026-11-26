@@ -1563,8 +1563,8 @@ body.gl-col-resizing, body.gl-col-resizing * { cursor: col-resize !important; us
 .gl-comp-panel-head { padding: 8px 10px; border-bottom: 1px solid var(--line); background: #fbfcfe; }
 .gl-comp-panel-head h3 { margin: 0 0 2px; font-size: var(--gl-font-size-secondary); font-weight: 600; }
 .gl-comp-panel-head span { color: var(--muted); font-size: 10px; }
-.gl-comp-matrix-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
-.gl-comp-matrix-head-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.gl-comp-matrix-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; }
+.gl-comp-matrix-head-actions { display: flex; flex-wrap: wrap; max-width: 100%; align-items: center; justify-content: flex-end; gap: 10px; }
 .gl-comp-inline-edit-note {
   border-radius: 999px; background: #eaf3ff; padding: 2px 7px;
   color: #245d9c !important; font-size: 9px !important; font-weight: 700; white-space: nowrap;
@@ -2927,6 +2927,18 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
   padding: 18px 20px; width: 380px; box-shadow: 0 12px 40px rgba(0,0,0,0.5);
 }
 .gl-modal-title { font-weight: 600; font-size: var(--gl-font-size-heading); margin-bottom: 12px; }
+.gl-review-backdrop { margin: 0; padding: 0; border: 0; width: 100%; height: 100%; max-width: none; max-height: none; color: inherit; }
+.gl-review-backdrop::backdrop { background: transparent; }
+.gl-population-review { width: min(760px, calc(100vw - 48px)); max-height: 88vh; overflow: auto; }
+.gl-population-review header, .gl-review-legend, .gl-review-pager { display: flex; align-items: center; gap: 12px; }
+.gl-population-review header { justify-content: space-between; margin-bottom: 12px; }
+.gl-population-review h2 { font-size: var(--gl-font-size-heading); margin: 0; }
+.gl-review-legend { flex-wrap: wrap; }
+.gl-review-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; }
+.gl-review-files { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(215px, 100%), 1fr)); gap: 12px; }
+.gl-review-files article { min-width: 0; color: var(--text); font-variant-numeric: tabular-nums; }
+.gl-review-files h3 { font-size: var(--gl-font-size-body); margin: 0 0 4px; overflow-wrap: anywhere; }
+.gl-review-pager { justify-content: flex-end; margin-top: 12px; }
 /* Create and Edit population (a dialog with a growing field, .gl-modal-grow): up to most of the
    window, the gate list growing to fill it and scrolling only beyond that; the buttons stay at the bottom. */
 .gl-modal:has(> .gl-modal-grow) { display: flex; flex-direction: column; width: 440px; max-width: calc(100vw - 32px); max-height: 85vh; }
@@ -2953,6 +2965,17 @@ details[open] > .gl-fold-summary .gl-icon-chevron { transform: rotate(90deg); }
 .gl-modal-history-when { color: var(--muted); font-variant-numeric: tabular-nums; }
 .gl-modal-history-what { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .gl-modal-history-what small { color: var(--muted); }
+/* Gating states: the Revert workspace list, with a field above it to save the current gating
+   and, in a row, a field to rename the chosen state. */
+.gl-gating-state-save { display: flex; gap: 8px; margin-bottom: 12px; }
+.gl-gating-state-save input, .gl-modal-gating-states .gl-modal-history-what input {
+  flex: 1 1 auto; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; padding: 5px 7px; font-size: var(--gl-font-size-body);
+}
+.gl-modal-gating-states .gl-modal-history-what strong { overflow-wrap: anywhere; }
+.gl-gating-state-spacer { flex: 1 1 auto; }
+.gl-gating-state-asking { align-items: center; }
+.gl-gating-state-asking > span { flex: 1 1 auto; min-width: 0; font-size: var(--gl-font-size-secondary); }
 .gl-sce-coldata-modal { width: min(620px, calc(100vw - 32px)); }
 .gl-sce-coldata-toolbar {
   display: flex;
@@ -4379,12 +4402,26 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-strategy-inspector .gl-strategy-section > h3 > span { margin-left: 6px; color: var(--muted); font-weight: 400; font-size: 11px; }
 .gl-strategy-file-search { width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: 12px; }
 .gl-strategy-body { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px !important; }
-/* The strategy's heading stays on one line, the file and tree names shortened first. */
-.gl-strategy-workspace .gl-plotting-head { min-width: 0; white-space: nowrap; overflow: hidden; }
-.gl-strategy-workspace .gl-plotting-head > strong { flex: none; }
-.gl-strategy-workspace .gl-plotting-head > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.gl-strategy-workspace .gl-plotting-head > span:first-of-type { flex: 0 1 auto; }
-.gl-strategy-workspace .gl-plotting-head > span:last-of-type { flex: 1 1 0; }
+/* The strategy is drawn on a white page inside the scrolling box, as the Illustration figure is:
+   the page is as wide and as tall as the title and grid drawn on it, the corner grip
+   (FigureResizeHandle.tsx) sits in its bottom-right corner, and a drag stretches it. The box is
+   the tab's own ground and scrolls. The renderer asks its container to scroll, which it did when
+   the container was the box; a wide grid widens the page instead. The page's margin is
+   STRATEGY_PAGE_PADDING in StrategyTab.tsx, which Fit to columns leaves room for. */
+.gl-mini-grid-container.gl-strategy-viewport { background: transparent; border: 0; border-radius: 0; padding: 6px; }
+.gl-strategy-page { position: relative; width: max-content; }
+.gl-strategy-page.is-drawn { background: #fff; padding: 14px; box-shadow: 0 1px 5px #26364a18; }
+.gl-strategy-page > #strategy-grid-container { overflow: visible !important; }
+/* The Strategy tab has no header row, as the Plotting tab has none: its strategies' tabs are
+   above it and Add to Layout is under Export. What is drawn (the file or the pool, and the tree)
+   is named at the end of the status line, on one line, shortened before the status is. */
+.gl-plotting-workspace.gl-strategy-workspace { grid-template-rows: minmax(0, 1fr); }
+@media (max-width: 760px) {
+  .gl-plotting-workspace.gl-strategy-workspace { grid-template-rows: auto; }
+}
+.gl-strategy-status { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.gl-strategy-status > p { flex: 1 1 auto; min-width: 0; margin: 0; }
+.gl-strategy-status > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--gl-font-size-secondary); }
 
 /* Plotting tab: the arm picker is the tree itself; the parent's arm lists beneath it. */
 .gl-plotting-parent-hint { margin: 0 0 6px; }
@@ -5036,6 +5073,8 @@ body.gl-row-resizing, body.gl-row-resizing * { cursor: row-resize !important; us
 .gl-channel-checklist-rows { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; }
 .gl-channel-checklist-empty { color: var(--muted); padding: 4px 0; }
 .gl-figure-heatmap-channels { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.gl-figure-axis-channels { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.gl-figure-axis-more > summary { color: var(--muted); font-size: 0.92em; }
 
 /* Plotting's charts and Illustration's figures: a tab each across the top, drawn as the Layout
    tab's sheet tabs (SheetTabs.tsx), with the tab's Undo and Redo at the strip's right end. */

@@ -4,6 +4,7 @@
 
 import type { ReactNode } from "react";
 import { CHART_TITLE_CHARS, compactChartLabel } from "./chartFormat";
+import { TITLE_CHAR_EM, textWidth } from "./chartLayout";
 
 export interface ChartPanelProps {
   width: number;
@@ -18,12 +19,12 @@ export interface ChartPanelProps {
 
 /**
  * A panel title's longest shown length: at most CHART_TITLE_CHARS, and no wider than the panel at
- * the title's font (counted as the panel layouts count a title, 0.62 of the font a character), so a
+ * the title's font (counted as the panel layouts count a title, TITLE_CHAR_EM of the font a character), so a
  * narrow panel shortens its title rather than cutting it at both edges. Never below 12 characters,
  * which compactChartLabel needs to keep some of the start and the last 8.
  */
 export function panelTitleChars(width: number, titleFont: number): number {
-  return Math.min(CHART_TITLE_CHARS, Math.max(12, Math.floor((width - 8) / (titleFont * 0.62))));
+  return Math.min(CHART_TITLE_CHARS, Math.max(12, Math.floor((width - 8) / textWidth(1, titleFont, TITLE_CHAR_EM))));
 }
 
 /**

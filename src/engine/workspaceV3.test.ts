@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { captureGatingState, GATING_STATES_FIELD, readGatingStates, restoredGatingState } from "../gatingStates";
+import { coreReducer, initialCoreState, type CoreState } from "../store";
 import {
   createCompensationBaselineProfile,
   type BaselineCompensationProfileRecord,
@@ -654,6 +656,27 @@ describe("uncompensated v3 validation", () => {
     candidate.minEvents = 100;
     const validated = await validateWorkspaceV3(candidate);
     expect((validated as unknown as { minEvents?: number }).minEvents).toBe(100);
+  });
+
+  // A workspace with a compensation profile is saved as version 3; with a gating state saved
+  // (Workspace → Gating states…) it refused to reopen: "Unexpected: gatingStates" (2026-11-26).
+  it("accepts and preserves the gating states the app saves, which restore the gates they hold", async () => {
+    let gated = coreReducer(initialCoreState(), { type: "loadSample", nEvents: 100 });
+    gated = coreReducer(gated, { type: "addGate", gateType: "rectangle", name: "CD4_positive",
+      xChannel: "FSC-A", yChannel: "SSC-A", vertices: [[10, 10], [60, 60]],
+      createPop: { name: "CD4_positive", parentId: gated.active_population_id! } });
+    const saved = captureGatingState(gated, ["D1"], "State 1", new Date("2026-11-26T03:00:00Z"), "s1");
+    const candidate = clone(migrateWorkspaceV2ToV3(workspaceV2())) as unknown as Record<string, unknown>;
+    candidate[GATING_STATES_FIELD] = [saved];
+    const validated = await validateWorkspaceV3(JSON.parse(JSON.stringify(candidate)));
+    const [back] = readGatingStates(validated);
+    expect(back).toEqual(saved);
+    // The state read back restores the gate it was saved with, at the same place.
+    const gate = (state: CoreState) => Object.values(state.gates).find((g) => g.name === "CD4_positive") as unknown as { vertices: [number, number][] };
+    const moved = coreReducer(gated, { type: "editGate", gateId: Object.values(gated.gates)[0].gate_id, vertices: [[30, 30], [90, 90]] });
+    const restored = restoredGatingState(moved, back, ["D1"]);
+    expect(gate(restored).vertices).toEqual([[10, 10], [60, 60]]);
+    expect(Object.values(restored.populations).map((p) => p.name).sort()).toEqual(Object.values(gated.populations).map((p) => p.name).sort());
   });
 
   it("accepts and preserves the tailoring reasons the app saves", async () => {

@@ -6,6 +6,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { composeProportionsChartSvg, fittedValueAxis, ProportionsChart, proportionsFactorTitle } from "./PlottingTab";
+import { panelTitleShown } from "./chart/ChartPanel";
 
 let root: Root;
 let host: HTMLDivElement;
@@ -124,6 +125,32 @@ describe("one boxplot panel per population", () => {
     expect(ticks(panels[0])).toEqual(["0%", "2%", "4%", "6%"]);
     expect(ticks(panels[2])).toEqual(ticks(panels[0]));
     expect(ticks(panels[1])).toEqual(["0%", "25%", "50%", "75%", "100%"]);
+  });
+
+  it("shortens a title too long for its panel by the rule the other charts' panels follow", () => {
+    const long = "B1_batch_with_a_long_synthetic_name";
+    act(() =>
+      root.render(
+        <ProportionsChart
+          plotType="box"
+          model={{ ...MODEL, perSample: MODEL.perSample.map((sample) => ({ ...sample, facet: long })) }}
+          catColors={["#2f80ed", "#e15759"]}
+          palette="paired"
+          averagePerUnit
+          populations={{}}
+          groupTitle="condition"
+          facetTitle="batch"
+          fonts={{ tick: 9, axis: 10, legend: 11 }}
+          appearance={{ height: 240, showGrid: true, showPoints: true, showLegend: true, pointRadius: 2 }}
+          arrangement={{ panelColumns: "", panelsPerRow: 2, panelWidth: 160 }}
+        />,
+      ),
+    );
+    const panel = host.querySelector("svg.gl-prop-panel")!;
+    const full = `rare · batch: ${long}`;
+    const shown = panel.querySelector(":scope > text")?.textContent;
+    expect(shown).not.toBe(full);
+    expect(shown).toBe(panelTitleShown(full, Number(panel.getAttribute("width")), 10));
   });
 
   it("fits an axis to a round number just above the highest value, with the decimals its ticks need", () => {
