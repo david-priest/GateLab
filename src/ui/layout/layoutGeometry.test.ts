@@ -18,14 +18,18 @@ import {
   type LayoutWorkspace,
 } from "../../engine/layout";
 import {
+  applyFrame,
   arrangeInGrid,
   arrangeUnitCount,
+  blockSizing,
   defaultGridColumns,
+  drawingArea,
   framePatch,
   matchReference,
   matchSizes,
   pxToUnit,
   resetScale,
+  resizedFrame,
   spaceItems,
   unitToPx,
 } from "./layoutGeometry";
@@ -106,6 +110,63 @@ describe("the proportions lock on typed values", () => {
   });
 });
 
+describe("how each kind of block follows its frame", () => {
+  const of = (recipe: Record<string, unknown>) => blockSizing(recipe as unknown as LayoutItem["recipe"]);
+  const area = (recipe: Record<string, unknown>, width: number, height: number) =>
+    drawingArea({ width, height, recipe: recipe as unknown as LayoutItem["recipe"] });
+  it("draws a plot no smaller than the renderer's panel, shows it scaled below that, and lets its frame be any size", () => {
+    for (const kind of ["biplot", "histogram"]) {
+      expect(of({ kind })).toEqual({ inset: 8, drawn: { width: 120, height: 120 }, scaledBelowDrawn: true, scaledWhole: false, minimum: { width: 1, height: 1 } });
+    }
+    expect(area({ kind: "biplot" }, 300, 200)).toEqual({ width: 292, height: 192 });
+    expect(area({ kind: "biplot" }, 60, 60)).toEqual({ width: 120, height: 120 });
+  });
+  it("scales a multi-population strategy as a whole, and lays a single population's strip out in its frame as it is", () => {
+    expect(of({ kind: "strategy", populationIds: ["CD4_positive"] })).toMatchObject({ scaledWhole: true, scaledBelowDrawn: false, drawn: { width: 120, height: 120 }, minimum: { width: 140, height: 140 } });
+    expect(of({ kind: "strategy" })).toMatchObject({ scaledWhole: false, drawn: { width: 1, height: 1 }, minimum: { width: 140, height: 140 } });
+    expect(area({ kind: "strategy" }, 100, 60)).toEqual({ width: 92, height: 52 });
+  });
+  it("draws a chart, a figure and an image block in at least 120 × 80 px, each with its own smallest frame", () => {
+    expect(of({ kind: "chart" })).toMatchObject({ drawn: { width: 120, height: 80 }, scaledBelowDrawn: false, scaledWhole: false, minimum: { width: 160, height: 120 } });
+    expect(of({ kind: "figure" }).minimum).toEqual({ width: 200, height: 150 });
+    expect(of({ kind: "imagewall" }).minimum).toEqual({ width: 120, height: 100 });
+    expect(area({ kind: "chart" }, 400, 60)).toEqual({ width: 392, height: 80 });
+  });
+  it("lets text, a shape and a placed image fill their frames", () => {
+    for (const kind of ["text", "shape", "image"]) expect(area({ kind }, 50, 30)).toEqual({ width: 50, height: 30 });
+    // A line may have no height.
+    expect(area({ kind: "shape" }, 80, 0)).toEqual({ width: 80, height: 0 });
+    expect(of({ kind: "shape" }).minimum).toEqual({ width: 0, height: 0 });
+  });
+});
+
+describe("giving an item a frame", () => {
+  it("sets the fields named and leaves the rest", () => {
+    const item = plot("A", 10, 20, 300, 200);
+    applyFrame(item, { x: 40, width: 260 });
+    expect(item).toMatchObject({ x: 40, y: 20, width: 260, height: 200 });
+    expect(item.zoom).toBeUndefined();
+  });
+  it("shows a plot scaled below the smallest it is drawn, and unscaled again once it is that size", () => {
+    const item = plot("A", 10, 10, 200, 200);
+    applyFrame(item, { width: 64 });
+    expect(item).toMatchObject({ width: 64, height: 200, zoom: 0.5 });
+    applyFrame(item, { width: 96, height: 96 });
+    expect(item.zoom).toBe(0.75);
+    applyFrame(item, { width: 200, height: 200 });
+    expect(item.zoom).toBeUndefined();
+  });
+  it("keeps the zoom of a plot scaled by hand, and of an item that is not a plot", () => {
+    const scaled = plot("A", 10, 10, 400, 400, { zoom: 0.5 });
+    applyFrame(scaled, { width: 300, height: 300 });
+    expect(scaled.zoom).toBe(0.5);
+    const chart = { ...plot("B", 10, 10, 400, 300, { zoom: 0.8 }), recipe: { kind: "chart" } } as unknown as LayoutItem;
+    applyFrame(chart, { width: 60, height: 40 });
+    expect(chart).toMatchObject({ width: 60, height: 40, zoom: 0.8 });
+    expect(resizedFrame(chart, 60, 40)).toEqual({ zoom: 0.8 });
+  });
+});
+
 describe("match width, height and size", () => {
   const three = () => sheetOf([
     plot("A", 100, 100, 300, 200),
@@ -137,6 +198,17 @@ describe("match width, height and size", () => {
     const other = three();
     expect(matchSizes(other, ["B", "C"], "size")).toBe("C");
     expect(frame(other, "B")).toEqual({ x: 500, y: 120, width: 220, height: 150 });
+  });
+  it("matches a plot to one smaller than a plot is drawn: the size is kept and the plot shown scaled", () => {
+    const sheet = sheetOf([plot("A", 100, 100, 96, 96, { zoom: 0.75 }), plot("B", 500, 120, 300, 300)]);
+    matchSizes(sheet, ["A", "B"], "size");
+    expect(frame(sheet, "B")).toEqual({ x: 500, y: 120, width: 96, height: 96 });
+    expect(sheet.items[1].zoom).toBe(0.75);
+    // A chart keeps its own minimum of 160 × 120 px.
+    const chart = { ...plot("C", 500, 120, 300, 300), recipe: { kind: "chart" } } as unknown as LayoutItem;
+    const mixed = sheetOf([plot("A", 100, 100, 96, 96, { zoom: 0.75 }), chart]);
+    matchSizes(mixed, ["A", "C"], "size");
+    expect(frame(mixed, "C")).toEqual({ x: 500, y: 120, width: 160, height: 120 });
   });
 });
 

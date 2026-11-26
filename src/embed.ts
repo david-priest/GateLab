@@ -77,3 +77,15 @@ export {
   importGatingML,
   type GatingMLResult,
 } from "./engine/gatingml";
+// A .gatelab workspace evaluated by the app's engine, for a host with no gating engine of its own:
+// GateLabR reads a workspace into R with it and fills the memberships it stores. Runs in plain Node.
+export {
+  evaluateWorkspaceArchive,
+  WORKSPACE_EVALUATION_FORMAT,
+  WORKSPACE_EVALUATION_VERSION,
+  type EvaluatedColumn,
+  type EvaluatedSample,
+  type WorkspaceArchiveInput,
+  type WorkspaceEvaluation,
+  type WorkspaceFcsFile,
+} from "./headless/evaluate";

@@ -4,7 +4,7 @@
 // over the sheet's items, so the tab's controls are thin and the geometry is tested here. Panel
 // letters are left out of every operation: the tab's commit puts each back beside its item.
 
-import { SCREEN_PX_PER_MM, layoutItemMinimum, layoutItemZoom, type LayoutItem, type LayoutSheet } from "../../engine/layout";
+import { SCREEN_PX_PER_MM, layoutItemMinimum, layoutItemZoom, zoomField, type LayoutItem, type LayoutRecipe, type LayoutSheet } from "../../engine/layout";
 import { arrangeUnits, contentBounds, type Box } from "../../engine/layoutArrange";
 import { isPanelLetter, readingOrder } from "./panelLetters";
 
@@ -29,12 +29,53 @@ export function unitToPx(value: number, unit: LengthUnit): number {
   return roundPx(unit === "mm" ? value * SCREEN_PX_PER_MM : value);
 }
 
+/** The smallest panel the plot renderer draws (px): a side asked smaller is drawn at this. */
+export const SMALLEST_PANEL = 120;
+
+/** How one kind of block follows its frame. */
+export interface BlockSizing {
+  /** What the frame keeps round the block's drawing, both sides of a direction together (px). */
+  inset: number;
+  /** The smallest area the block is drawn in (px): its frame less the inset, when that is larger. */
+  drawn: { width: number; height: number };
+  /** In a frame too small for `drawn` the block is drawn at that size and shown scaled (the item's zoom). */
+  scaledBelowDrawn: boolean;
+  /** Drawn at one size and scaled as a whole to its frame, which keeps its proportions when resized. */
+  scaledWhole: boolean;
+  /** The smallest frame a typed or matched size gives the block. */
+  minimum: { width: number; height: number };
+}
+
 /**
- * The smallest frame a typed size gives an item. A biplot or histogram made smaller than it is
- * drawn is shown scaled to its frame, as a dragged one is, so its only floor is a pixel.
+ * The sizing of a block, by its recipe: the one place that says how small each kind is drawn, how
+ * small its frame can be made and whether it is scaled, read by the tab's drawing, the drag and
+ * typed sizes (resizedFrame) and the match tools.
  */
-export function typedMinimum(kind: LayoutItem["recipe"]["kind"]): { width: number; height: number } {
-  return kind === "biplot" || kind === "histogram" ? { width: 1, height: 1 } : layoutItemMinimum(kind);
+export function blockSizing(recipe: LayoutRecipe): BlockSizing {
+  const plot = recipe.kind === "biplot" || recipe.kind === "histogram";
+  // A multi-population strategy grid; a single population's is a strip of steps.
+  const grid = recipe.kind === "strategy" && !!recipe.populationIds?.length;
+  // Text, a shape and a placed image fill their frames.
+  const fills = recipe.kind === "text" || recipe.kind === "shape" || recipe.kind === "image";
+  return {
+    inset: fills ? 0 : 8,
+    // A strip lays its panels out in the frame as it is, and is shown scaled when they would be
+    // under the smallest panel; a plot or a grid is never fitted to less than that panel.
+    drawn: plot || grid ? { width: SMALLEST_PANEL, height: SMALLEST_PANEL }
+      : fills ? { width: 0, height: 0 }
+      : recipe.kind === "strategy" ? { width: 1, height: 1 }
+      : { width: 120, height: 80 },
+    scaledBelowDrawn: plot,
+    scaledWhole: grid,
+    // A plot made smaller than it is drawn is shown scaled, so its only floor is a pixel.
+    minimum: plot ? { width: 1, height: 1 } : layoutItemMinimum(recipe.kind),
+  };
+}
+
+/** The area a block is drawn in, for its frame (a zoomed item's is its frame divided by its zoom). */
+export function drawingArea(item: Pick<LayoutItem, "width" | "height" | "recipe">): { width: number; height: number } {
+  const { inset, drawn } = blockSizing(item.recipe);
+  return { width: Math.max(drawn.width, item.width - inset), height: Math.max(drawn.height, item.height - inset) };
 }
 
 /**
@@ -48,7 +89,7 @@ export function framePatch(
   keepRatio: boolean,
 ): Partial<Record<FrameField, number>> {
   if (field === "x" || field === "y") return { [field]: Math.max(0, px) };
-  const minimum = typedMinimum(item.recipe.kind);
+  const { minimum } = blockSizing(item.recipe);
   const value = Math.max(minimum[field], px);
   if (!keepRatio || item.width <= 0 || item.height <= 0) return { [field]: value };
   if (field === "width") {
@@ -57,6 +98,36 @@ export function framePatch(
   }
   const width = roundPx(Math.max(minimum.width, (value * item.width) / item.height));
   return { width, height: value };
+}
+
+/**
+ * An item's zoom once resized to a frame. The zoom is kept, so a plot is drawn again to fill the
+ * frame with its fonts the size they look; but a plot is never drawn smaller than it can be, so
+ * one made smaller than that is drawn at that size and shown scaled to the frame. A plot held at
+ * that size (`item` is its frame before the resize) is scaled back up as its frame grows, to
+ * unscaled once the frame is that size again, so making it larger undoes making it smaller.
+ */
+export function resizedFrame(item: Pick<LayoutItem, "width" | "height" | "zoom" | "recipe">, width: number, height: number): { zoom?: number } {
+  const zoom = layoutItemZoom(item);
+  const { inset, drawn, scaledBelowDrawn } = blockSizing(item.recipe);
+  if (!scaledBelowDrawn) return zoomField(zoom);
+  // The smallest frame side the plot is drawn at: its smallest panel inside the inset.
+  const smallest = Math.min(drawn.width, drawn.height) + inset;
+  const fits = Math.min(width, height) / smallest;
+  const held = zoom < 1 && Math.min(item.width, item.height) / zoom <= smallest + 1;
+  return zoomField(held ? Math.min(1, fits) : Math.min(zoom, fits));
+}
+
+/**
+ * Give an item a frame: the fields named, and the zoom that frame shows it at (resizedFrame).
+ * Every way of sizing an item goes through here (a drag, a typed size, a matched size), so a
+ * plot made small is shown scaled whichever way it was made small.
+ */
+export function applyFrame(item: LayoutItem, frame: Partial<Record<FrameField, number>>): void {
+  const { zoom } = resizedFrame(item, frame.width ?? item.width, frame.height ?? item.height);
+  Object.assign(item, frame);
+  if (zoom === undefined) delete item.zoom;
+  else item.zoom = zoom;
 }
 
 /** The items an arrange or match acts on: those named, not locked, and not panel letters. */
@@ -79,17 +150,20 @@ export function matchReference(sheet: Pick<LayoutSheet, "items">, ids: readonly 
 
 /**
  * Give each chosen item the width, height or both of the reference item, keeping its top-left
- * corner. Locked items and panel letters are not changed. Returns the reference's id, or null when
- * there was nothing to match.
+ * corner; no side goes under the item's typed minimum, so a plot matched to a small one is shown
+ * scaled as a typed or dragged one is. Locked items and panel letters are not changed. Returns
+ * the reference's id, or null when there was nothing to match.
  */
 export function matchSizes(sheet: LayoutSheet, ids: readonly string[], how: MatchHow): string | null {
   const reference = matchReference(sheet, ids);
   if (!reference) return null;
   for (const item of arrangeable(sheet, ids)) {
     if (item.id === reference.id) continue;
-    const minimum = layoutItemMinimum(item.recipe.kind);
-    if (how !== "height") item.width = Math.max(minimum.width, reference.width);
-    if (how !== "width") item.height = Math.max(minimum.height, reference.height);
+    const { minimum } = blockSizing(item.recipe);
+    applyFrame(item, {
+      ...(how !== "height" && { width: Math.max(minimum.width, reference.width) }),
+      ...(how !== "width" && { height: Math.max(minimum.height, reference.height) }),
+    });
   }
   return reference.id;
 }

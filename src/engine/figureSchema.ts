@@ -85,7 +85,7 @@ export function isFigureSpec(v: unknown): v is FigureSpec {
     !["samples", "populations", "plots"].every((d) => dimensions.includes(d)) ||
     dimensions.some(
       (d) =>
-        !["samples", "populations", "plots"].includes(d) &&
+        !["samples", "populations", "plots", "xchannels", "ychannels"].includes(d) &&
         !d.startsWith("metadata:") &&
         !d.startsWith("popmeta:"),
     )

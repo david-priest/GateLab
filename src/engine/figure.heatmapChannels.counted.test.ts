@@ -14,6 +14,7 @@ import {
   buildFigurePanel,
   captureFigureTransforms,
   figureHierarchies,
+  biplotChannelPairs,
   heatmapChannels,
   layoutFigure,
   migrateFigure,
@@ -192,5 +193,110 @@ describe("A histogram plot with several channels", () => {
     const [page] = layoutFigure(figure, fx.samples, fx.trees);
     expect(page.rows.map((row) => row.map((v) => v.id))).toEqual([["0", "hist"]]);
     expect(page.panels.every((p) => p.plot.x === "CD4")).toBe(true);
+  });
+});
+
+describe("A biplot with several x or y channels", () => {
+  it("is a plot per channel pair along the plots dimension, each panel the one-pair biplot of its channels", () => {
+    const fx = fixture();
+    // Files down the rows, the pairs across the columns: CD8 and FSC-A on y against CD4 on x.
+    const biplot: FigurePlot = { id: "bi", name: "Bi", x: "CD4", y: "CD8", type: "biplot", yChannels: ["CD8", "FSC-A"] };
+    const figure = captureFigureTransforms({ ...fx.figure, populations: [fx.refs[0]], plots: [biplot], rows: ["samples"], columns: ["plots"], pages: [] }, fx.samples);
+    expect(Object.keys(figure.transforms)).toEqual(expect.arrayContaining(["CD4", "CD8", "FSC-A"]));
+    const [page] = layoutFigure(figure, fx.samples, fx.trees);
+    expect(page.columns.map((column) => column.map((v) => v.label))).toEqual([["Bi · CD8"], ["Bi · FSC-A"]]);
+    expect(page.panels.map((p) => [p.row, p.column, p.plot.id, p.plot.x, p.plot.y, p.samples])).toEqual([
+      [0, 0, "bi", "CD4", "CD8", ["D1"]], [0, 1, "bi", "CD4", "FSC-A", ["D1"]],
+      [1, 0, "bi", "CD4", "CD8", ["D2"]], [1, 1, "bi", "CD4", "FSC-A", ["D2"]],
+    ]);
+    expect(new Set(page.panels.map((p) => p.key)).size).toBe(4);
+    const sources = fx.samples.map((entry) => prepareFigureSource(entry, fx.trees[fx.state.active_hierarchy_id], fx.state));
+    for (const panel of page.panels) {
+      const built = buildFigurePanel(panel, figure, sources, fx.trees, style, {}, true).config!;
+      const single = buildFigurePanel({ ...panel, plot: { ...biplot, x: panel.plot.x, y: panel.plot.y, yChannels: undefined } }, figure, sources, fx.trees, style, {}, true).config!;
+      const entry = fx.samples.find((s) => s.id === panel.samples[0])!;
+      expect(built.n_events).toBe(recompute(entry.sample, fx.state).populations[fx.refs[0].populationId].event_count);
+      expect(built.x).toEqual(single.x);
+      expect(built.y).toEqual(single.y);
+      expect(built.y_label).toBe(single.y_label);
+    }
+  });
+
+  it("crosses every x channel with every y channel, naming both when both vary, and leaves out a channel against itself", () => {
+    const fx = fixture();
+    const biplot: FigurePlot = { id: "bi", name: "Bi", x: "CD4", y: "CD8", type: "biplot", channels: ["CD4", "CD8"], yChannels: ["CD8", "FSC-A"] };
+    expect(biplotChannelPairs(biplot)).toEqual([{ x: "CD4", y: "CD8" }, { x: "CD4", y: "FSC-A" }, { x: "CD8", y: "FSC-A" }]);
+    const [page] = layoutFigure({ ...fx.figure, populations: [fx.refs[0]], plots: [biplot], rows: ["samples"], columns: ["plots"], pages: [] }, fx.samples, fx.trees);
+    expect(page.columns.map((column) => column[0].label)).toEqual(["Bi · CD4 × CD8", "Bi · CD4 × FSC-A", "Bi · CD8 × FSC-A"]);
+    expect(page.panels.filter((p) => p.samples[0] === "D1").map((p) => [p.plot.x, p.plot.y])).toEqual([["CD4", "CD8"], ["CD4", "FSC-A"], ["CD8", "FSC-A"]]);
+  });
+
+  it("stays one plot value, with its own id, when it has one channel on each axis", () => {
+    const fx = fixture();
+    const figure = { ...fx.figure, populations: [fx.refs[0]], plots: [{ id: "bi", name: "Bi", x: "CD4", y: "CD8", type: "biplot" as const, channels: ["CD4"], yChannels: ["CD8"] }] };
+    const [page] = layoutFigure(figure, fx.samples, fx.trees);
+    expect([...page.rows, ...page.columns].flat().filter((v) => v.dimension === "plots").map((v) => v.id)).toEqual(["bi"]);
+    expect(page.panels.every((p) => p.plot.x === "CD4" && p.plot.y === "CD8")).toBe(true);
+    expect(biplotChannelPairs({ x: "CD4", y: "CD4" })).toEqual([{ x: "CD4", y: "CD4" }]);
+  });
+});
+
+describe("Channel dimensions placed on the shelves", () => {
+  it("puts each Y channel in a column with the files down the rows, each panel the one-pair biplot of its file", () => {
+    const fx = fixture();
+    const biplot: FigurePlot = { id: "bi", name: "Bi", x: "CD4", y: "CD8", type: "biplot", yChannels: ["CD8", "FSC-A"] };
+    const figure = captureFigureTransforms({ ...fx.figure, populations: [fx.refs[0]], plots: [biplot], rows: ["samples"], columns: ["ychannels"], pages: ["populations", "plots"] }, fx.samples);
+    expect(isFigureSpec(figure)).toBe(true);
+    const [page] = layoutFigure(figure, fx.samples, fx.trees);
+    expect(page.rows.map((row) => row.map((v) => v.label))).toEqual([["D1.fcs"], ["D2.fcs"]]);
+    expect(page.columns.map((column) => column.map((v) => v.label))).toEqual([["CD8"], ["FSC-A"]]);
+    expect(page.panels.map((p) => [p.row, p.column, p.plot.id, p.plot.x, p.plot.y, p.samples])).toEqual([
+      [0, 0, "bi", "CD4", "CD8", ["D1"]], [0, 1, "bi", "CD4", "FSC-A", ["D1"]],
+      [1, 0, "bi", "CD4", "CD8", ["D2"]], [1, 1, "bi", "CD4", "FSC-A", ["D2"]],
+    ]);
+    const sources = fx.samples.map((entry) => prepareFigureSource(entry, fx.trees[fx.state.active_hierarchy_id], fx.state));
+    for (const panel of page.panels) {
+      const built = buildFigurePanel(panel, figure, sources, fx.trees, style, {}, true).config!;
+      const single = buildFigurePanel({ ...panel, plot: { ...biplot, x: panel.plot.x, y: panel.plot.y, yChannels: undefined } }, figure, sources, fx.trees, style, {}, true).config!;
+      const entry = fx.samples.find((s) => s.id === panel.samples[0])!;
+      expect(built.n_events).toBe(recompute(entry.sample, fx.state).populations[fx.refs[0].populationId].event_count);
+      expect(built.y).toEqual(single.y);
+    }
+  });
+
+  it("draws X channels across and Y channels down as a matrix, leaving out a channel against itself", () => {
+    const fx = fixture();
+    const biplot: FigurePlot = { id: "bi", name: "Bi", x: "CD4", y: "CD8", type: "biplot", channels: ["CD4", "CD8"], yChannels: ["CD8", "FSC-A"] };
+    const figure = { ...fx.figure, sampleIds: ["D1"], populations: [fx.refs[0]], plots: [biplot], rows: ["ychannels"], columns: ["xchannels"], pages: ["samples", "populations", "plots"] } as FigureSpec;
+    const [page] = layoutFigure(figure, fx.samples, fx.trees);
+    expect(page.rows.map((row) => row[0].label)).toEqual(["CD8", "FSC-A"]);
+    expect(page.columns.map((column) => column[0].label)).toEqual(["CD4", "CD8"]);
+    expect(page.panels.filter((p) => p.samples.length).map((p) => [p.row, p.column, p.plot.x, p.plot.y])).toEqual([
+      [0, 0, "CD4", "CD8"], [1, 0, "CD4", "FSC-A"], [1, 1, "CD8", "FSC-A"],
+    ]);
+  });
+
+  it("rides a plot's other axis along the plots dimension, and draws a plot with one channel at the dimension's first value", () => {
+    const fx = fixture();
+    const several: FigurePlot = { id: "bi", name: "Bi", x: "CD4", y: "CD8", type: "biplot", channels: ["CD4", "FSC-A"], yChannels: ["CD8", "FSC-A"] };
+    const one: FigurePlot = { id: "one", name: "One", x: "CD8", y: "CD4", type: "biplot" };
+    const figure = { ...fx.figure, sampleIds: ["D1"], populations: [fx.refs[0]], plots: [several, one], rows: ["plots"], columns: ["xchannels"], pages: ["samples", "populations"] } as FigureSpec;
+    const [page] = layoutFigure(figure, fx.samples, fx.trees);
+    expect(page.rows.map((row) => row[0].label)).toEqual(["Bi · CD8", "Bi · FSC-A", "One"]);
+    expect(page.columns.map((column) => column[0].label)).toEqual(["CD4", "FSC-A"]);
+    expect(page.panels.filter((p) => p.samples.length).map((p) => [p.row, p.column, p.plot.id, p.plot.x, p.plot.y])).toEqual([
+      [0, 0, "bi", "CD4", "CD8"], [0, 1, "bi", "FSC-A", "CD8"],
+      [1, 0, "bi", "CD4", "FSC-A"],
+      [2, 0, "one", "CD8", "CD4"],
+    ]);
+  });
+
+  it("passes over a placed channel dimension that no plot takes several channels for", () => {
+    const fx = fixture();
+    const figure = { ...fx.figure, populations: [fx.refs[0]], plots: [{ id: "bi", name: "Bi", x: "CD4", y: "CD8", type: "biplot" as const }], rows: ["populations", "plots"], columns: ["samples", "xchannels"], pages: ["ychannels"] } as FigureSpec;
+    const pages = layoutFigure(figure, fx.samples, fx.trees);
+    expect(pages).toHaveLength(1);
+    expect(pages[0].columns.map((column) => column.map((v) => v.dimension))).toEqual([["samples"], ["samples"]]);
+    expect(pages[0].panels.every((p) => p.plot.x === "CD4" && p.plot.y === "CD8")).toBe(true);
   });
 });

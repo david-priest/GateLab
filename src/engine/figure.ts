@@ -61,11 +61,17 @@ export interface FigurePlot {
   y: string;
   type: "biplot" | "histogram" | "heatmap" | "chart";
   /**
-   * The channels of a summary heatmap plot (a column each) or a histogram plot (a panel each, as
-   * a plot of its own along the plots dimension), in this order; `x` is kept as the first of them
-   * for readers that know one channel. Absent means `x` alone. Ignored for the other types.
+   * The channels of a summary heatmap plot (a column each), a histogram plot (a panel each, as a
+   * plot of its own along the plots dimension) or a biplot's x axis (likewise, crossed with
+   * `yChannels`), in this order; `x` is kept as the first of them for readers that know one
+   * channel. Absent means `x` alone. Ignored for charts.
    */
   channels?: string[];
+  /**
+   * A biplot's y channels, each crossed with every x channel as a plot of its own along the plots
+   * dimension; `y` is kept as the first of them. Absent means `y` alone. Ignored for the other types.
+   */
+  yChannels?: string[];
   /** What a plot of type "chart" draws; ignored for the other types. */
   chart?: FigureChart;
   population?: FigurePopulation;
@@ -85,6 +91,13 @@ export type FigureDimension =
   | "samples"
   | "populations"
   | "plots"
+  /**
+   * The x (or y) channels of the plots that take several on that axis (a biplot's `channels` or
+   * `yChannels`, a histogram's `channels`), a value each. Unplaced, a plot's channels ride along
+   * the plots dimension instead, a plot per channel or pair.
+   */
+  | "xchannels"
+  | "ychannels"
   | `metadata:${string}`
   /** A population metadata field, from the Metadata tab's population table: groups the populations. */
   | `popmeta:${string}`;
@@ -457,12 +470,43 @@ export function histogramChannels(plot: Pick<FigurePlot, "x" | "channels">): str
   return plotChannelList(plot);
 }
 
-/** The id along the plots dimension of one channel of a histogram plot with several. */
+/**
+ * A biplot's channel pairs, a plot each: every x channel (`channels`, or `x` alone) crossed with
+ * every y channel (`yChannels`, or `y` alone), x running fastest within each y. A pair of a
+ * channel with itself is left out unless it is the only pair.
+ */
+export function biplotChannelPairs(plot: Pick<FigurePlot, "x" | "y" | "channels" | "yChannels">): { x: string; y: string }[] {
+  const xs = biplotAxisChannels(plot, "x");
+  const ys = biplotAxisChannels(plot, "y");
+  const pairs = ys.flatMap((y) => xs.map((x) => ({ x, y })));
+  const distinct = pairs.filter((pair) => pair.x !== pair.y);
+  return distinct.length ? distinct : pairs.slice(0, 1);
+}
+
+/** The channel dimensions, by axis. */
+export const CHANNEL_DIMENSIONS = { x: "xchannels", y: "ychannels" } as const satisfies Record<"x" | "y", FigureDimension>;
+
+/** A plot's channels on one axis when it takes several there, else null: a biplot on either axis, a histogram on x. */
+export function severalAxisChannels(plot: FigurePlot, axis: "x" | "y"): string[] | null {
+  const list = plot.type === "biplot" ? biplotAxisChannels(plot, axis) : plot.type === "histogram" && axis === "x" ? histogramChannels(plot) : [];
+  return list.length > 1 ? list : null;
+}
+
+/** A biplot's channels on one axis: `channels` (x) or `yChannels` (y), else `x` or `y` alone. */
+export function biplotAxisChannels(plot: Pick<FigurePlot, "x" | "y" | "channels" | "yChannels">, axis: "x" | "y"): string[] {
+  return axis === "x" ? plotChannelList(plot) : channelList(plot.yChannels, plot.y);
+}
+
+/** The id along the plots dimension of one channel of a histogram plot with several, or of one pair of a biplot's. */
 const PLOT_CHANNEL_SEPARATOR = "\u0000";
 
 function plotChannelList(plot: Pick<FigurePlot, "x" | "channels">): string[] {
-  const listed = Array.isArray(plot.channels) ? plot.channels.filter((key): key is string => typeof key === "string" && key !== "") : [];
-  return listed.length ? [...new Set(listed)] : plot.x ? [plot.x] : [];
+  return channelList(plot.channels, plot.x);
+}
+
+function channelList(channels: unknown, single: string): string[] {
+  const listed = Array.isArray(channels) ? channels.filter((key): key is string => typeof key === "string" && key !== "") : [];
+  return listed.length ? [...new Set(listed)] : single ? [single] : [];
 }
 
 export function captureFigureTransforms(
@@ -471,7 +515,7 @@ export function captureFigureTransforms(
 ): FigureSpec {
   const transforms = { ...figure.transforms };
   for (const key of new Set(
-    figure.plots.flatMap((p) => (p.type === "heatmap" ? heatmapChannels(p) : p.type === "histogram" ? histogramChannels(p) : [p.x, ...(p.type === "biplot" ? [p.y] : [])])),
+    figure.plots.flatMap((p) => (p.type === "heatmap" ? heatmapChannels(p) : p.type === "histogram" ? histogramChannels(p) : p.type === "biplot" ? biplotChannelPairs(p).flatMap((pair) => [pair.x, pair.y]) : [p.x])),
   )) {
     const sample = samples.find(
       (s) => s.sample.index(key) !== undefined,
@@ -601,6 +645,7 @@ export function layoutFigure(
         metadata: {},
       },
   );
+  const placed = new Set<FigureDimension>([...figure.rows, ...figure.columns, ...figure.pages]);
   const values = new Map<FigureDimension, FigureValue[]>([
     [
       "samples",
@@ -616,15 +661,34 @@ export function layoutFigure(
     ],
     [
       "plots",
-      // A histogram of several channels is a plot per channel along this dimension, named by the
-      // plot and the channel; every other plot is one value.
+      // A plot's channels ride along this dimension while their axis's channel dimension is not
+      // placed: a histogram of several channels is a plot per channel, named by the plot and the
+      // channel, and a biplot of several x or y channels a plot per pair, named by the plot and the
+      // channels that vary. Every other plot is one value.
       figure.plots.flatMap((p) => {
-        const channels = p.type === "histogram" ? histogramChannels(p) : [];
-        return channels.length > 1
-          ? channels.map((channel) => ({ dimension: "plots" as const, id: `${p.id}${PLOT_CHANNEL_SEPARATOR}${channel}`, label: `${p.name} · ${channel}` }))
-          : [{ dimension: "plots" as const, id: p.id, label: p.name }];
+        const along = (axis: "x" | "y") => (placed.has(CHANNEL_DIMENSIONS[axis]) ? null : severalAxisChannels(p, axis));
+        const xs = along("x"), ys = along("y");
+        if (!xs && !ys) return [{ dimension: "plots" as const, id: p.id, label: p.name }];
+        const pairs = (ys ?? [undefined]).flatMap((y) => (xs ?? [undefined]).map((x) => ({ x, y })));
+        // A channel against itself is left out here only when both axes are known along this
+        // dimension; with one axis placed, the panel leaves it out instead.
+        const fixed = (axis: "x" | "y") => (severalAxisChannels(p, axis) ? undefined : p[axis]);
+        const distinct = p.type !== "biplot" ? pairs : pairs.filter((pair) => {
+          const x = pair.x ?? fixed("x"), y = pair.y ?? fixed("y");
+          return x === undefined || y === undefined || x !== y;
+        });
+        return (distinct.length ? distinct : pairs.slice(0, 1)).map((pair) => ({
+          dimension: "plots" as const,
+          // A histogram's id names its channel alone, as before y channels could vary.
+          id: [p.id, pair.x ?? "", ...(p.type === "biplot" ? [pair.y ?? ""] : [])].join(PLOT_CHANNEL_SEPARATOR),
+          label: `${p.name} · ${[pair.x, pair.y].filter((c): c is string => c !== undefined).join(" × ")}`,
+        }));
       }),
     ],
+    ...(["x", "y"] as const).map((axis): [FigureDimension, FigureValue[]] => [
+      CHANNEL_DIMENSIONS[axis],
+      [...new Set(figure.plots.flatMap((p) => severalAxisChannels(p, axis) ?? []))].map((channel) => ({ dimension: CHANNEL_DIMENSIONS[axis], id: channel, label: channel })),
+    ]),
   ]);
   const populationValue = (ref: FigurePopulation, field: string) =>
     populationMetadata?.[ref.populationId]?.[field] ?? "Unassigned";
@@ -644,14 +708,16 @@ export function layoutFigure(
           .map((value) => ({ dimension, id: value, label: value })),
       );
     }
+  // A channel dimension no plot takes several channels for has no values, and is passed over.
+  const active = (dims: FigureDimension[]) => dims.filter((d) => (d !== "xchannels" && d !== "ychannels") || !!values.get(d)?.length);
   const visible = (dims: FigureDimension[]) =>
-    dims.filter(
+    active(dims).filter(
       (d) =>
         (d !== "samples" || figure.composition === "separate") &&
         (d !== "populations" || !figure.overlayPopulations),
     );
   const combinationsCount = [
-    ...figure.pages,
+    ...active(figure.pages),
     ...visible(figure.rows),
     ...visible(figure.columns),
   ].reduce((n, d) => n * (values.get(d)?.length ?? 0), 1);
@@ -659,7 +725,7 @@ export function layoutFigure(
     throw new Error(
       "This arrangement exceeds 50,000 combinations. Select fewer files / samples, populations or metadata groupings.",
     );
-  return combinations(figure.pages, values)
+  return combinations(active(figure.pages), values)
     .map((page) => {
       const rows = combinations(visible(figure.rows), values),
         columns = combinations(visible(figure.columns), values);
@@ -668,12 +734,27 @@ export function layoutFigure(
           const dimensions = [...page, ...row, ...column];
           const value = (name: string) =>
             dimensions.find((d) => d.dimension === name)?.id;
-          // A histogram's channel rides in the plots value's id; the panel draws the plot at it.
-          const [plotId, plotChannel] = (value("plots") ?? "").split(PLOT_CHANNEL_SEPARATOR);
+          // A plot's channel on each axis comes from that axis's channel dimension where it is
+          // placed, else from the plots value's id, where a histogram's channel or a biplot's pair
+          // rides; the panel draws the plot at them.
+          const [plotId, alongX, alongY] = (value("plots") ?? "").split(PLOT_CHANNEL_SEPARATOR);
           const listed =
             figure.plots.find((p) => p.id === plotId) ??
             figure.plots[0];
-          const plot = plotChannel !== undefined ? { ...listed, x: plotChannel } : listed;
+          const at = { x: alongX || listed.x, y: alongY || listed.y };
+          let absent = false;
+          for (const axis of ["x", "y"] as const) {
+            const channel = value(CHANNEL_DIMENSIONS[axis]);
+            if (channel === undefined) continue;
+            const several = severalAxisChannels(listed, axis);
+            // A plot with one channel on this axis is drawn once along its dimension, at its first value.
+            if (!several) absent ||= channel !== values.get(CHANNEL_DIMENSIONS[axis])?.[0]?.id;
+            else if (several.includes(channel)) at[axis] = channel;
+            else absent = true;
+          }
+          // A biplot of a channel against itself is drawn only when it has no other pair.
+          if (listed.type === "biplot" && at.x === at.y && biplotChannelPairs(listed).some((pair) => pair.x !== pair.y)) absent = true;
+          const plot = at.x !== listed.x || at.y !== listed.y ? { ...listed, x: at.x, y: at.y } : listed;
           const own = plot.together ? figure.populations : plot.populations?.length ? plot.populations : undefined;
           const population =
             own?.[0] ??
@@ -699,7 +780,7 @@ export function layoutFigure(
           // sits under (or right of) every population's plots, not after the first population's.
           const drawnAt = plot.type === "chart" && plot.chart?.summary ? Math.max(0, (values.get("populations")?.length ?? 1) - 1) : 0;
           const repeated = !!own && value("populations") !== undefined && Number(value("populations")) !== drawnAt;
-          const sampleIds = !populationInGroup || repeated ? [] : selected
+          const sampleIds = !populationInGroup || repeated || absent ? [] : selected
             .filter(
               (s) =>
                 (!value("samples") || s.id === value("samples")) &&

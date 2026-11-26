@@ -17,7 +17,7 @@ import type { PaletteName } from "../engine/palettes";
 import { plottingGroupColours } from "./plottingColours";
 import { useI18n } from "./i18n";
 import { CHART_TITLE_CHARS, compactChartLabel, formatMeasured } from "./chart/chartFormat";
-import { fittedInnerWidth, labelsRotate, labelWidths, leftForTurnedLabels, longestLabelWidth, rotatedLabelsBottom, withNRows, type ChartPanelLayout } from "./chart/chartLayout";
+import { fittedInnerWidth, labelsRotate, labelWidths, leftForTurnedLabels, longestLabelWidth, rotatedLabelsBottom, textWidth, TICK_CHAR_EM, TITLE_CHAR_EM, withNRows, type ChartPanelLayout } from "./chart/chartLayout";
 import { cellMarkN, cellMarkNWithUnits, ChartNRow, nRowSize } from "./chart/chartN";
 import { ChartCategoryAxis, ChartHorizontalValueAxis, ChartValueAxis } from "./chart/ChartAxis";
 import { ChartPanel } from "./chart/ChartPanel";
@@ -198,7 +198,7 @@ export function ridgelinePanelLayout(
     bottom: 20 + tickFont + axisFont,
     left: Math.max(36, Math.round(14 + longestLabelWidth(labels, tickFont, 30))),
   };
-  const titleWidth = Math.min(titleChars, CHART_TITLE_CHARS) * titleFont * 0.62 + 12;
+  const titleWidth = textWidth(Math.min(titleChars, CHART_TITLE_CHARS), titleFont, TITLE_CHAR_EM) + 12;
   const innerWidth = fittedInnerWidth(panelWidth, margin, Math.max(200, titleWidth - margin.left - margin.right));
   return { width: margin.left + innerWidth + margin.right, height: margin.top + plotHeight + margin.bottom, margin, rotateLabels: false };
 }
@@ -307,9 +307,9 @@ export function cellPanelLayout(
   nWidth = 0,
 ): CellPanelLayout {
   const longestTick = Math.max(1, ...tickLabels.map((label) => label.length));
-  const margin = { top: 22, right: 14, bottom: 46, left: Math.max(48, Math.round(28 + longestTick * tickFont * 0.6)) };
+  const margin = { top: 22, right: 14, bottom: 46, left: Math.max(48, Math.round(28 + textWidth(longestTick, tickFont, TICK_CHAR_EM))) };
   const slot = Math.max(plotType === "box" ? 34 : 46, nWidth);
-  const titleWidth = Math.min(titleChars, CHART_TITLE_CHARS) * titleFont * 0.62 + 12;
+  const titleWidth = textWidth(Math.min(titleChars, CHART_TITLE_CHARS), titleFont, TITLE_CHAR_EM) + 12;
   const innerAt = (left: number) => fittedInnerWidth(panelWidth, { left, right: margin.right }, Math.max(90, labels.length * slot, titleWidth - left - margin.right));
   let innerWidth = innerAt(margin.left);
   const step = labels.length ? innerWidth / labels.length : innerWidth;

@@ -27,6 +27,7 @@ import { ActionNote } from "./ui/ActionNote";
 import { DEFAULT_GATING_FONT_SIZES, GatingPlot, type GatingPlotActions, type NewGate } from "./plots/GatingPlot";
 import { buildCompanionPlot, type CompanionPlot, type CompanionPlotInput, type CompanionPlotView, type CompanionPoolFile } from "./plots/companionPlotPayload";
 import { GatingCompanionPlot } from "./ui/GatingCompanionPlot";
+import { PopulationReview } from "./ui/PopulationReview";
 import { PlotRemoveButton } from "./ui/PlotRemoveButton";
 import { GatingPlotResizeHandle } from "./ui/GatingPlotResizeHandle";
 import { MAX_GATING_PLOTS, ONE_GATING_PLOT, addGatingPlot, plotGridLayout, plotGridShape, removeGatingPlot, selectGatingPlot, type GatingPlots } from "./ui/gatingPlotViews";
@@ -67,6 +68,7 @@ import { MiflowcytReportModal, type ReportScope } from "./ui/MiflowcytReportModa
 import { MembershipExportModal, type MembershipExportResult } from "./ui/MembershipModals";
 import { buildMiflowcytReport, renderMiflowcytHtml, renderMiflowcytMarkdown, type MiflowcytAuthorInput, type MiflowcytFileInput } from "./reports/miflowcytReport";
 import { isEmptyMiflowcytAuthor, MIFLOWCYT_AUTHOR_FIELD, readMiflowcytAuthor } from "./reports/miflowcytAuthor";
+import { titrationRecordFromWorkspace } from "./compensationControls/titration";
 import { exportMemberships, populationKeys } from "./reports/membershipExport";
 import { EmptyState } from "./ui/EmptyState";
 import { MenuButton, type MenuEntry, type MenuItem } from "./ui/MenuButton";
@@ -274,6 +276,11 @@ import {
 } from "./engine/workspaceHistory";
 import { WorkspaceHistoryModal } from "./ui/WorkspaceHistoryModal";
 import {
+  captureGatingState, GATING_STATES_FIELD, gatingStateIsCurrent, gatingStatesChannelKeys, gatingStatesOnChannels,
+  nextGatingStateName, readGatingStates, restoredGatingState, uniqueGatingStateName, type SavedGatingState,
+} from "./gatingStates";
+import { GatingStatesModal } from "./ui/GatingStatesModal";
+import {
   coreReducer,
   initialCoreState,
   spiderBoxGrowth,
@@ -320,6 +327,7 @@ import { PlottingChartsTab } from "./ui/PlottingCharts";
 import { DivisionTab, type DivisionProfile } from "./ui/DivisionTab";
 import { parseMetadataTable, lookupMetadataRow, sampleDisplayId, SAMPLE_ID_FIELD, type MetadataColumn } from "./engine/metadata";
 import { DEFAULT_CONTOUR_THRESHOLD, DEFAULT_DISPLAY_MODE, DEFAULT_MAX_EVENTS, workspaceGatingRecord, workspaceSampleRecord } from "./workspaceRecords";
+import { buildHostedPortableCopy, type HostedPortableCopy } from "./hostedPortableCopy";
 import { ScalesTab } from "./ui/ScalesTab";
 import { ChannelTransformSelect, channelTransformKind } from "./ui/ChannelTransformSelect";
 import type {
@@ -344,7 +352,8 @@ import {
   type MatrixLibraryRow,
   type MatrixNumbers,
 } from "./ui/compensationLibrary";
-import { GRID_ID as STRATEGY_GRID_ID, StrategyTab, type StrategyConfig, type StrategyRequest } from "./ui/StrategyTab";
+import { GRID_ID as STRATEGY_GRID_ID, type StrategyConfig, type StrategyRequest } from "./ui/StrategyTab";
+import { StrategiesTab } from "./ui/Strategies";
 import { IllustrationTab } from "./ui/IllustrationTab";
 import {
   allowedByLocks,
@@ -504,6 +513,10 @@ const MIN_GATE_LIST_HEIGHT = 80;
 const CompensationTab = lazy(lazyChunk("CompensationTab", async () => {
   const module = await import("./ui/CompensationTab");
   return { default: module.CompensationTab };
+}));
+const TitrationWorkspace = lazy(lazyChunk("TitrationWorkspace", async () => {
+  const module = await import("./ui/TitrationWorkspace");
+  return { default: module.TitrationWorkspace };
 }));
 const LayoutTab = lazy(lazyChunk("LayoutTab", async () => {
   const module = await import("./ui/LayoutTab");
@@ -1823,6 +1836,7 @@ export default function App({ hostProposals = null }: {
     if (maxEvents > 0) lastMaxEvents.current = maxEvents;
   }, [maxEvents]);
   const [activeTab, setActiveTab] = useState<TabId>("gating");
+  const [populationReviewOpen, setPopulationReviewOpen] = useState(false);
   // A context menu belongs to the tab it was opened on: a tab switch, by click, key or tour, closes it.
   useEffect(() => { window.dispatchEvent(new Event(DISMISS_MENUS_EVENT)); }, [activeTab]);
   // The walkthrough tutorial: it reads the app through readTourContext (declared below, called
@@ -1866,7 +1880,7 @@ export default function App({ hostProposals = null }: {
   // Illustration-tab config, lifted to a ref so it survives the tab's unmount (persists across tab
   // switches) and can be saved to the workspace; plus named presets.
   const illustConfigRef = useRef<IllustrationConfig | null>(null);
-  const strategyConfigRef = useRef<StrategyConfig | null>(null); // Strategy controls, survive tab switches
+  const strategyConfigRef = useRef<StrategyConfig | null>(null); // Strategy controls and the list of strategies, survive tab switches
   const [illustrationPresets, setIllustrationPresets] = useState<IllustrationPreset[]>([]);
   const [illustVersion, setIllustVersion] = useState(0); // bump to remount IllustrationTab on workspace load
   /**
@@ -1898,6 +1912,9 @@ export default function App({ hostProposals = null }: {
   const [hierarchyModal, setHierarchyModal] = useState<HierarchyModalMode | null>(null);
   /** Revert workspace…: the checkpoints kept for this workspace, while they are read and once listed. */
   const [historyPicker, setHistoryPicker] = useState<{ checkpoints: WorkspaceCheckpoint[]; loading: boolean } | null>(null);
+  /** Gating states…: the gating saved by name in this workspace (gatingStates.ts), and whether their dialog is open. */
+  const [gatingStates, setGatingStates] = useState<SavedGatingState[]>([]);
+  const [gatingStatesOpen, setGatingStatesOpen] = useState(false);
   const [promoteConfirmOpen, setPromoteConfirmOpen] = useState(false);
   /** A tailored gate whose coordinates the tree is about to take, waiting on the confirmation. */
   const [tailoredUse, setTailoredUse] = useState<{ gateId: string } | null>(null);
@@ -2081,6 +2098,8 @@ export default function App({ hostProposals = null }: {
   /** The MIFlowCyt items only the author can supply: saved with the workspace (miflowcytAuthor.ts). */
   const [miflowcytAuthor, setMiflowcytAuthor] = useState<MiflowcytAuthorInput>({});
   const [miflowcytOpen, setMiflowcytOpen] = useState(false);
+  const [titrationRecord, setTitrationRecord] = useState<unknown>();
+  const [titrationOpen, setTitrationOpen] = useState(false);
   const [membershipExportOpen, setMembershipExportOpen] = useState(false);
   /** Counts below this are greyed in Statistics and the population tree; saved with the workspace. */
   const [minEvents, setMinEvents] = useState<number | null>(null);
@@ -3708,6 +3727,7 @@ export default function App({ hostProposals = null }: {
     setSampleImportProgress(null);
     setWorkspaceId(nextWorkspaceId);
     setMinEvents(null);
+    setGatingStates([]);
     setTailoringReasons({});
     setWorkspaceCompensation(newEmptyWorkspaceCompensationState());
     setMatrixNumbers(null);
@@ -3763,6 +3783,8 @@ export default function App({ hostProposals = null }: {
     setPopulationMetaColumns([]);
     setDivisionProfiles({});
     setMiflowcytAuthor({});
+    setTitrationRecord(undefined);
+    setTitrationOpen(false);
 
     setPending(null);
     setPendingGatingMlImport(null);
@@ -3975,6 +3997,50 @@ export default function App({ hostProposals = null }: {
     setChorusImport(null);
     markWorkspaceDirty();
     setImportMsg("Gates, populations and hierarchies cleared; the files, scales and metadata are kept. Undo brings them back.");
+  }
+
+  // Gating states…: the gating saved by name in the workspace, to return to (gatingStates.ts).
+  // The states the gating as it is now matches are worked out only while the dialog is open.
+  const currentGatingStateIds = useMemo(() => {
+    if (!gatingStatesOpen) return new Set<string>();
+    const fileIds = samples.map((entry) => entry.id);
+    return new Set(gatingStates.filter((saved) => gatingStateIsCurrent(state, saved, fileIds)).map((saved) => saved.id));
+  }, [gatingStatesOpen, gatingStates, state, samples]);
+  function saveGatingState(name: string) {
+    const saved = captureGatingState(state, samples.map((entry) => entry.id), uniqueGatingStateName(gatingStates, name));
+    setGatingStates((states) => [...states, saved]);
+    markWorkspaceDirty();
+  }
+  /** The saved state takes the gating as it is now; its name and place in the list stay. */
+  function updateGatingState(id: string) {
+    setGatingStates((states) => states.map((saved) =>
+      saved.id === id ? captureGatingState(state, samples.map((entry) => entry.id), saved.name, new Date(), saved.id) : saved));
+    markWorkspaceDirty();
+  }
+  function renameGatingState(id: string, name: string) {
+    setGatingStates((states) => states.map((saved) => (saved.id === id ? { ...saved, name: uniqueGatingStateName(states, name, id) } : saved)));
+    markWorkspaceDirty();
+  }
+  function deleteGatingState(id: string) {
+    setGatingStates((states) => states.filter((saved) => saved.id !== id));
+    markWorkspaceDirty();
+  }
+  /**
+   * The gating goes back to a saved state: installed as opening a workspace installs its gating,
+   * on a copy, and adopted as one undo entry. A checkpoint is kept first, as before anything else
+   * that replaces gating. Compensation, scales and the files are not the state's and stay.
+   */
+  function restoreGatingState(id: string) {
+    const saved = gatingStates.find((entry) => entry.id === id);
+    if (!saved) return;
+    const next = restoredGatingState(state, saved, samples.map((entry) => entry.id));
+    // saveWorkspaceCheckpoint clones the workspace synchronously, so this is the gating before the restore.
+    void checkpointCurrentWorkspace("before-revert").catch(reportCheckpointRefusal);
+    dispatch({ type: "adoptStrategy", base: state, next });
+    setHierarchyActionMessage(null);
+    setGatingStatesOpen(false);
+    markWorkspaceDirty();
+    setImportMsg(`Gating state "${saved.name}" restored. Undo brings back the gating as it was.`);
   }
 
   /** What a file follows: its group's tree when it is in a group, else the tree itself. */
@@ -9023,8 +9089,11 @@ export default function App({ hostProposals = null }: {
           drawnAssayNote;
 
         const initialHostRevision = workspaceEnvelope?.revision ?? 0;
+        setTitrationRecord(titrationRecordFromWorkspace(workspaceEnvelope ? parsedJsonOrNull(workspaceEnvelope.workspaceJson) : undefined));
+        setTitrationOpen(false);
         setMiflowcytAuthor(workspaceEnvelope ? readMiflowcytAuthor(parsedJsonOrNull(workspaceEnvelope.workspaceJson)) : {});
         setMinEvents(workspaceEnvelope ? readMinEvents(parsedJsonOrNull(workspaceEnvelope.workspaceJson)) : null);
+        setGatingStates(workspaceEnvelope ? readGatingStates(parsedJsonOrNull(workspaceEnvelope.workspaceJson)) : []);
         setTailoringReasons(workspaceEnvelope ? readTailoringReasons(parsedJsonOrNull(workspaceEnvelope.workspaceJson)) : {});
         setHostWorkspaceRevision(initialHostRevision);
         hostWorkspaceRevisionRef.current = initialHostRevision;
@@ -9973,6 +10042,7 @@ export default function App({ hostProposals = null }: {
           gateLabelBackground,
           // The Compensation list's M1, M2, … (compensationLibrary.ts MatrixNumbers).
           ...(matrixNumbers ? { matrixNumbers } : {}),
+          ...(titrationRecord === undefined ? {} : { titrationReview: titrationRecord }),
         } as Record<string, unknown>),
         paneWidths: { left: leftWidth, right: sideWidth },
       },
@@ -9988,6 +10058,8 @@ export default function App({ hostProposals = null }: {
       populationMetadata,
       populationMetaColumns,
       ...(minEvents === null ? {} : { [MIN_EVENTS_FIELD]: minEvents }),
+      // Not in the engine's workspace type (src/engine is frozen); read back by readGatingStates.
+      ...(gatingStates.length ? { [GATING_STATES_FIELD]: gatingStates } : {}),
       ...(() => {
         const reasons = savedTailoringReasons(tailoringReasons, workspaceTrees(state));
         return Object.keys(reasons).length ? { [TAILORING_REASONS_FIELD]: reasons } : {};
@@ -10926,6 +10998,80 @@ export default function App({ hostProposals = null }: {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
+   * The R host's session as a portable .gatelab (hostedPortableCopy.ts): every sample written as an
+   * FCS file of the values it is gated on, the workspace restated for the standalone app, and the
+   * copy opened and gated by the engine and compared with this session before it is handed back.
+   */
+  async function hostedPortableCopy(): Promise<HostedPortableCopy> {
+    const ws = buildWorkspaceFile();
+    const datasetId = samples[0]?.hostSource?.datasetId;
+    if (!ws || !datasetId) throw new Error("The hosted session is not ready to copy.");
+    const live = buildHostedMemberships(state, hostedMembershipSamples(datasetId));
+    return buildHostedPortableCopy({
+      workspace: ws,
+      samples: samples.map((entry) => ({
+        entryId: entry.id,
+        hostSampleId: entry.hostSource!.sampleId,
+        name: entry.name,
+        sample: entry.sample,
+      })),
+      live,
+      app: `GateLab ${pkg.version}`,
+    });
+  }
+
+  /** What a saved hosted copy says: the check, and each thing in the copy that is not as in the session. */
+  function hostedCopyNotes(copy: HostedPortableCopy): string {
+    const notes = [
+      t("{populations} populations checked in {samples} samples, event by event", { populations: copy.checked.populations, samples: copy.checked.samples }),
+    ];
+    if (copy.compensatedValues.length) {
+      notes.push(t("compensation is off in the copy for {names}: their compensated values were written", { names: copy.compensatedValues.join(", ") }));
+    }
+    const renamed = Object.entries(copy.channelKeys);
+    if (renamed.length) {
+      notes.push(t("channels named as the FCS files name them: {pairs}", { pairs: renamed.map(([from, to]) => `${from} → ${to}`).join(", ") }));
+    }
+    if (copy.leftOutChannels.length) {
+      notes.push(t("not offered by the standalone app (no gate uses them): {names}", { names: copy.leftOutChannels.join(", ") }));
+    }
+    return notes.join(" · ");
+  }
+
+  // The R host's Save Portable Copy: the session as a .gatelab the standalone app opens with
+  // nothing to relink, checked against this session before it is offered for saving.
+  async function saveHostedPortableCopy() {
+    setBusy(true);
+    setStatusLine(t("Checking the portable copy against this session…"));
+    try {
+      const copy = await hostedPortableCopy();
+      const base = sanitizeFilePart(hostDatasetDescriptor?.label || "gatelabr-session");
+      let savedName = `${base}.${WORKSPACE_EXT}`;
+      if (supportsFileSystemAccess()) {
+        const outcome = await saveToNewFile({
+          suggestedName: savedName,
+          accept: { "application/zip": [`.${WORKSPACE_EXT}`] },
+          description: "GateLab workspace (self-contained)",
+          mime: "application/zip",
+        }, { data: copy.bytes as BlobPart }, downloadBlob);
+        if (outcome.kind !== "written") {
+          if (outcome.kind === "downloaded") setImportMsg(`${outcome.message} · ${hostedCopyNotes(copy)}`);
+          return;
+        }
+        savedName = outcome.handle.name;
+      } else {
+        downloadBlob(savedName, new Blob([copy.bytes as BlobPart], { type: "application/zip" }));
+      }
+      setImportMsg(`${t("Saved portable copy · {name}", { name: savedName })} · ${hostedCopyNotes(copy)}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setStatusLine(null);
       setBusy(false);
     }
   }
@@ -11915,8 +12061,10 @@ export default function App({ hostProposals = null }: {
       // restated as the key the same FCS parameter has now (workspaceChannelKeys.ts), in the
       // gates, the display channels and each file's channel settings. Axis ranges, divisions and
       // figure settings saved under an old key are not restated and fall back to their defaults.
+      const savedGatingStates = readGatingStates(raw);
       const savedChannelKeys = new Set<string>([
         ...gateChannelKeys(ws.gating.gates),
+        ...gatingStatesChannelKeys(savedGatingStates),
         ...(ws.gating.stored_hierarchies ?? []).flatMap((h) => [...gateChannelKeys(h.gates ?? {})]),
         ws.display?.xChannel ?? "",
         ws.display?.yChannel ?? "",
@@ -12175,7 +12323,10 @@ export default function App({ hostProposals = null }: {
       setWsStorage(storage);
       setWorkspaceId(nextWorkspaceId);
       setMiflowcytAuthor(readMiflowcytAuthor(raw));
+      setTitrationRecord(titrationRecordFromWorkspace(ws));
+      setTitrationOpen(false);
       setMinEvents(readMinEvents(raw));
+      setGatingStates(gatingStatesOnChannels(savedGatingStates, channelKeyRemap));
       setTailoringReasons(readTailoringReasons(raw));
       setDirty(false);
       noteRecentWorkspace(wsH, wsFileName);
@@ -12540,6 +12691,8 @@ export default function App({ hostProposals = null }: {
     const ws = buildWorkspaceFile();
     if (!ws) throw new Error("This workspace cannot be written as it stands.");
     if (kind === "linked") return new Blob([packReferenceWorkspace(ws) as BlobPart], { type: "application/octet-stream" });
+    // Under the R host, the checked copy the R host menu's Save Portable Copy writes.
+    if (isSceHost) return new Blob([(await hostedPortableCopy()).bytes as BlobPart], { type: "application/zip" });
     if (ws.version === WORKSPACE_VERSION_3) {
       const plan = await preparePortableBundle(ws);
       const parts: BlobPart[] = [];
@@ -16072,6 +16225,12 @@ export default function App({ hostProposals = null }: {
                   disabled: !sample || !host.workspaces || hostWorkspaceStatus === "saving",
                   onClick: saveToSce,
                 },
+                {
+                  label: t("Save Portable Copy…"),
+                  title: t("Write a self-contained .gatelab workspace that standalone GateLab opens with nothing to relink: each sample as an FCS file of the values gated here, with the gates, populations, tailoring and scales. The copy is opened and gated before it is offered for saving, and is refused if any population differs."),
+                  disabled: busy || !sample || compensationApplyStatus !== null,
+                  onClick: () => { void saveHostedPortableCopy(); },
+                },
                 ...(host.capabilities.dataModel.writeBackColumns && host.colData
                   ? [{
                       label: "Export populations to colData…",
@@ -16161,6 +16320,13 @@ export default function App({ hostProposals = null }: {
                   title: "Go back to an earlier state of this workspace: as it was opened, or any checkpoint GateLab kept in this browser. The current state is kept as a checkpoint first.",
                   disabled: !sample || busy || isSceHost || driveTarget !== null,
                   onClick: () => void openRevertDialog(),
+                },
+                {
+                  label: t("Gating states…"),
+                  className: "gl-gating-states",
+                  title: t("Save the gating as it is now under a name, or return to a state saved earlier. The states are kept in the workspace."),
+                  disabled: !sample || busy,
+                  onClick: () => setGatingStatesOpen(true),
                 },
                 "separator",
                 {
@@ -18385,6 +18551,12 @@ export default function App({ hostProposals = null }: {
                   isSceHost && host.rowData ? writeHostedPanel : undefined
                 }
                 hostWriteBusy={hostAdapterWriteBusy}
+                onReviewTitration={isSceHost ? undefined : () => setTitrationOpen(true)}
+                titrationUnavailable={
+                  layoutFiles.some((file) => file.sample.instrument === "flow" && !file.sample.hostedAssayId)
+                    ? undefined
+                    : t("The titration review reads flow cytometry files, and none is loaded.")
+                }
               />
             )}
             {activeTab === "scales" && (
@@ -18403,7 +18575,7 @@ export default function App({ hostProposals = null }: {
               />
             )}
             {activeTab === "strategy" && (
-              <StrategyTab
+              <StrategiesTab
                 key={illustVersion}
                 sampleName={samples.find(entry => entry.id === activeSampleId)?.name}
                 onFitChannels={fitChannels}
@@ -18429,6 +18601,7 @@ export default function App({ hostProposals = null }: {
                 onScaleChange={setGlobalScale}
                 request={agentStrategyRequest}
                 onRequestTaken={takeAgentStrategyRequest}
+                onConfigChange={markWorkspaceDirty}
               />
             )}
             {activeTab === "illustration" && (
@@ -18703,6 +18876,11 @@ export default function App({ hostProposals = null }: {
             grow
             menu={populationsPaneMenu}
             actions={<>
+              <button type="button" className="gl-mini-btn" aria-label={t("Open population review")}
+                title={t("Compare the active population with its ancestors across selected files")}
+                disabled={!activePopulation} onClick={() => setPopulationReviewOpen(true)}>
+                {t("Review")}
+              </button>
               <button
                 type="button"
                 className="gl-mini-btn gl-pane-add-population"
@@ -18782,6 +18960,13 @@ export default function App({ hostProposals = null }: {
         </aside>
       </div>
 
+      {populationReviewOpen && activeTab === "gating" && sample && activePopulation && (
+        <PopulationReview key={activePopulation.population_id} state={state} population={activePopulation}
+          files={layoutFiles} checked={checkedSampleIds} reference={sample} referenceName={fileName}
+          currentX={sample.channels[xIdx].key} currentY={sample.channels[yIdx].key} rangeOf={plottingGatingRange}
+          underActiveTree={fileUnderActiveTree} panelKeyOf={panelKeyOf} revision={sampleDataRevisionKey}
+          onClose={() => setPopulationReviewOpen(false)} />
+      )}
       {hostReview && (
         <StrategyProposalReview review={hostReview.review} note={hostReview.note} busy={hostReview.busy} refused={hostReview.refused}
           onAccept={() => void acceptHostReview()} onReject={rejectHostReview} />
@@ -19042,6 +19227,19 @@ export default function App({ hostProposals = null }: {
           onCancel={() => setHistoryPicker(null)}
         />
       )}
+      {gatingStatesOpen && (
+        <GatingStatesModal
+          states={gatingStates}
+          currentIds={currentGatingStateIds}
+          suggestedName={nextGatingStateName(gatingStates)}
+          onSave={saveGatingState}
+          onRestore={restoreGatingState}
+          onUpdate={updateGatingState}
+          onRename={renameGatingState}
+          onDelete={deleteGatingState}
+          onClose={() => setGatingStatesOpen(false)}
+        />
+      )}
       {crud?.kind === "confirmNewWorkspace" && (
         <ConfirmModal
           title="Start a new workspace?"
@@ -19233,6 +19431,12 @@ export default function App({ hostProposals = null }: {
         </div>
         );
       })()}
+
+      {titrationOpen && activeTab === "panel" && !isSceHost && <Suspense fallback={null}><TitrationWorkspace
+        samples={layoutFiles} state={state} record={titrationRecord} onClose={() => setTitrationOpen(false)}
+        onSave={(value) => { setTitrationRecord(value); markWorkspaceDirty(); }}
+        onPages={LAYOUT_TAB_AVAILABLE ? addPanelPagesToLayout : undefined}
+      /></Suspense>}
 
       {chorusStats && (
         <ChorusStatisticsModal

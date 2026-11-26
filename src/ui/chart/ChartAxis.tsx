@@ -4,6 +4,7 @@
 
 import type { ReactNode } from "react";
 import { compactChartLabel } from "./chartFormat";
+import { TICK_HALF_CHAR_EM, textWidth } from "./chartLayout";
 
 export interface ChartValueAxisProps {
   /** Major ticks: where each is on the value scale and what it reads. */
@@ -74,7 +75,7 @@ export function ChartHorizontalValueAxis({ ticks, minor = [], x, left, top, plot
   let right = -Infinity;
   const shown = ticks.map((tick) => {
     const at = x(tick.at);
-    const half = tick.label.length * tickFont * 0.32 + 3;
+    const half = textWidth(tick.label.length, tickFont, TICK_HALF_CHAR_EM) + 3;
     if (!tick.label || at - half < right) return "";
     right = at + half;
     return tick.label;

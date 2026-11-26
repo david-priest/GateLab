@@ -17,10 +17,11 @@ import { figureHierarchies, resolvePopulationInTree, type FigureSample } from ".
 import { useFigureSources } from "./useFigureSources";
 import { useGateInk } from "../plots/gateInk";
 import { FigureStyleFollow, useFigureStyle } from "./figureStyle";
+import { focusTextSizeField, plotTextKind, textSizeMenuEntries } from "./textSizeMenu";
 import { populationTreeOrder } from "../engine/populations";
 import { sanitizeFilePart } from "../engine/fcsExport";
 import type { LayoutPlotRecipe, LayoutStrategyRecipe } from "../engine/layout";
-import type { StrategyConfig as SavedStrategyConfig } from "../engine/workspace";
+import type { StrategyRecord } from "./strategySet";
 import { ContextMenu, type ContextMenuState } from "./ContextMenu";
 import type { MenuEntry } from "./MenuButton";
 import { StrategyPopulationPicker } from "./StrategyPopulationPicker";
@@ -32,6 +33,7 @@ import { useI18n } from "./i18n";
 import { usePersistedTabState } from "./tabState";
 import { composeStrategyTree, strategyTreeRows } from "./strategyTree";
 import { strategyFrames } from "./strategyFrames";
+import { FigureResizeHandle } from "./FigureResizeHandle";
 
 interface Props {
   sample: Sample;
@@ -75,6 +77,17 @@ interface Props {
   request?: StrategyRequest | null;
   /** The request with this nonce has been taken, so the App can drop it and a later remount restores the user's controls. */
   onRequestTaken?: (nonce: number) => void;
+  /**
+   * Called after a render that left the controls different from the ones last mirrored into
+   * configRef; the first render's are among them, the tab filling its defaults in as it mounts.
+   */
+  onConfigChange?: () => void;
+  /**
+   * The tree's selection has not changed since this tab last followed it, so a single-population
+   * strategy opens on its own population (one of several strategies, each a tab: Strategies.tsx).
+   * Absent, it opens on the tree's selection, as the tab did before it had tabs.
+   */
+  ownPopulation?: boolean;
 }
 
 /** What an agent asks the tab to draw; the populations are checked against the active tree before it gets here. */
@@ -94,11 +107,12 @@ export interface StrategyRequest {
 
 /**
  * The Strategy tab's controls as the workspace saves them: engine/workspace.ts's StrategyConfig,
- * and whether the exports carry the gating tree (absent reads as off). That one is declared here,
- * engine/ being frozen; the workspace writes the tab's config whole and reads it back as written,
- * so it is saved and restored with the others.
+ * and whether the exports carry the gating tree (absent reads as off). That one is declared in
+ * strategySet.ts, engine/ being frozen; the workspace writes the tab's config whole and reads it
+ * back as written, so it is saved and restored with the others. So is the list of strategies,
+ * when there are several: this tab draws one, and reads and writes that one's controls only.
  */
-export type StrategyConfig = SavedStrategyConfig & { exportTree?: boolean };
+export type StrategyConfig = StrategyRecord;
 
 type GateView = StrategyConfig["gateView"][number];
 
@@ -107,6 +121,8 @@ export const GRID_ID = "strategy-grid-container-grid";
 
 /** The largest panel Fit to columns draws, as the Plot size field allows. */
 const FIT_MAX_PLOT_SIZE = 500;
+/** The margin of the page the strategy is drawn on (.gl-strategy-page.is-drawn), which Fit to columns leaves room for. */
+export const STRATEGY_PAGE_PADDING = 14;
 /**
  * Fit to columns: the panel size at which `columns` panels, `gap` apart, fill `width`; never under
  * the renderer's smallest panel (120 px), never over FIT_MAX_PLOT_SIZE.
@@ -145,13 +161,16 @@ export function StrategyTab({
   onScaleChange,
   request,
   onRequestTaken,
+  onConfigChange,
+  ownPopulation = false,
 }: Props) {
   /** Channels of the plots most recently rendered, for Fit. */
   const shownChannels = useRef<readonly string[]>([]);
   const { t } = useI18n();
   const rootId = state.root_population_id ?? "";
   const c0 = configRef.current; // restore on (re)mount; null = first-ever
-  const [section, setSection] = useState<StrategySection>("data");
+  // The settings section stays open across the tab's remounts (another strategy shown, an undo).
+  const [section, setSection] = usePersistedTabState<StrategySection>("strategy.section", "data");
   const [mode, setMode] = useState<"single" | "multi">(c0?.mode ?? "single");
   const [exportDpi, setExportDpi] = useState(c0?.exportDpi ?? 300); // SVG/PDF export resolution (72–1200)
   const [multiPops, setMultiPops] = useState<string[]>(c0?.multiPops ?? []);
@@ -193,7 +212,7 @@ export function StrategyTab({
   // A new strategy uses the workspace's figure style for its four text sizes; one saved before the
   // style keeps its own, which are kept for when it stops following.
   const [followFigureStyle, setFollowFigureStyle] = useState(c0 ? c0.followFigureStyle === true : true);
-  const { style: figureStyle } = useFigureStyle();
+  const { style: figureStyle, setStyle: setFigureStyle, openEditor: openFigureStyleEditor } = useFigureStyle();
   const fontTick = followFigureStyle ? figureStyle.fontTick : ownFontTick;
   const fontAxis = followFigureStyle ? figureStyle.fontAxis : ownFontAxis;
   const fontTitle = followFigureStyle ? figureStyle.fontTitle : ownFontTitle;
@@ -227,6 +246,12 @@ export function StrategyTab({
   /** What the last pooled draw left out: gates the files do not hold alike, and files left out. */
   const [poolReport, setPoolReport] = useState<{ drawn: number; omittedGates: string[]; leftOut: StrategyLeftOut[] } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  /** The scrolling box the strategy is shown in: the width the panels are fitted to. */
+  const viewportRef = useRef<HTMLDivElement>(null);
+  /** The page the strategy is drawn on, as wide and as tall as its title and grid: the corner grip sits in its corner, and a drag stretches it. */
+  const pageRef = useRef<HTMLDivElement>(null);
+  // While the page's corner is dragged: the stretch shown, kept as the plot size on release.
+  const [dragScale, setDragScale] = useState(1);
   /** The channels and ranges of each drawn panel, by its cell key, for the navigate drag. */
   const panelsRef = useRef<Map<string, PannablePanel>>(new Map());
   /** The multi-population grid's or the strip's shape and panel size as last drawn, for the Layout block. */
@@ -260,9 +285,9 @@ export function StrategyTab({
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   const [availableWidth, setAvailableWidth] = useState(0);
   useEffect(() => {
-    if (!containerRef.current || typeof ResizeObserver === "undefined") return;
+    if (!viewportRef.current || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(entries => setAvailableWidth(Math.round(entries[0].contentRect.width)));
-    observer.observe(containerRef.current); return () => observer.disconnect();
+    observer.observe(viewportRef.current); return () => observer.disconnect();
   }, []);
   useEffect(() => {
     setMultiPops(ids => ids.filter(id => !!state.populations[id]));
@@ -287,9 +312,13 @@ export function StrategyTab({
   }
 
   // Follow the active population when it changes in the tree; in the commit that took an agent's
-  // request, the request's population stands.
+  // request, the request's population stands. A strategy that opens on its own population starts
+  // from the selection as it is, and follows the next change.
+  const followedPopulation = useRef<string | null | undefined>(ownPopulation ? state.active_population_id : undefined);
   useEffect(() => {
     if (takenRequest !== notifiedRequest.current) return;
+    if (state.active_population_id === followedPopulation.current) return;
+    followedPopulation.current = state.active_population_id;
     if (state.active_population_id) setPopId(state.active_population_id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.active_population_id]);
@@ -311,8 +340,15 @@ export function StrategyTab({
     ...(followFigureStyle ? { followFigureStyle } : {}),
     exportTree,
   };
+  const mirroredConfig = useRef<string | null>(null);
+  const onConfigChangeRef = useRef(onConfigChange);
+  onConfigChangeRef.current = onConfigChange;
   useEffect(() => {
     configRef.current = currentConfig;
+    const written = JSON.stringify(currentConfig);
+    if (written === mirroredConfig.current) return;
+    mirroredConfig.current = written;
+    onConfigChangeRef.current?.();
   });
 
   // Pseudocolor isn't offered when both forward+back are shown (overlay needs scatter/contour).
@@ -364,7 +400,10 @@ export function StrategyTab({
         // The rows sit close unless a line runs between them, which a tree's never do.
         const gridRowGap = showArrows ? strategyArrowRowGap(arrows) : 8;
         const gridCols = nodes.length ? Math.max(...nodes.map((node) => node.col)) + 1 : 1;
-        const fitted = fitToColumns && availableWidth > 0 ? fitPanelSize(availableWidth - 8, gridCols, gridGap) : plotSize;
+        // The grid's own margins come off the width with the page's: 4 px at the left, and at the
+        // right 4 px or, where arrows are drawn, the gutter they are given (reserveArrowGutters).
+        const gridMargins = 4 + (arrows.length ? gridGap : 4);
+        const fitted = fitToColumns && availableWidth > 0 ? fitPanelSize(availableWidth - gridMargins - 2 * STRATEGY_PAGE_PADDING, gridCols, gridGap) : plotSize;
         const fontScale = fitted < plotSize ? fitted / plotSize : 1;
         const scaled = (size: number) => Math.max(5, Math.round(size * fontScale * 10) / 10);
         const gridFonts = fontScale < 1
@@ -430,7 +469,7 @@ export function StrategyTab({
       // Fit ticked: the steps' columns, no more than there are steps, fill the width, as in the
       // multi-population grid; the renderer is then given that size rather than fitting again.
       const columns = Math.max(1, Math.min(nColumns, steps.length));
-      const fitted = fitToColumns && availableWidth > 0 ? fitPanelSize(availableWidth - 8, columns, 8) : plotSize;
+      const fitted = fitToColumns && availableWidth > 0 ? fitPanelSize(availableWidth - 8 - 2 * STRATEGY_PAGE_PADDING, columns, 8) : plotSize;
       const fontScale = fitted < plotSize ? fitted / plotSize : 1;
       const scaled = (size: number) => Math.max(5, Math.round(size * fontScale * 10) / 10);
       setDrawnSize(fitted);
@@ -443,7 +482,9 @@ export function StrategyTab({
         gateView,
         displayMode: effMode,
         maxEvents: cap,
-        nColumns,
+        // The columns drawn, not the columns allowed: the renderer makes its grid as wide as the
+        // columns it is given, and a grid wider than its steps would widen the page with it.
+        nColumns: columns,
         plotSize: fitted,
         fitToColumns: false,
         contourThreshold,
@@ -631,8 +672,43 @@ export function StrategyTab({
    * the pointer, that plot (the events it shows on its gate's channels) to the Layout tab or to
    * the Gating tab; then Fit and the exports.
    */
+  const styleSectionRef = useRef<HTMLElement>(null);
+  /**
+   * Larger and smaller for the text under the pointer, and the way to the text sizes: this tab's
+   * Fonts fields, or the workspace figure style's editor while the strategy uses the style.
+   */
+  const textSizeItems = (target: EventTarget | null) => {
+    const kind = plotTextKind(target);
+    const sizes = [
+      { key: "fontTick" as const, value: fontTick, min: 6, max: 24, onCommit: setFontTick },
+      { key: "fontAxis" as const, value: fontAxis, min: 6, max: 28, onCommit: setFontAxis },
+      { key: "fontTitle" as const, value: fontTitle, min: 6, max: 28, onCommit: setFontTitle },
+      { key: "fontGate" as const, value: fontGate, min: 6, max: 24, onCommit: setFontGate },
+    ];
+    return {
+      kind,
+      items: textSizeMenuEntries({
+        kind,
+        sizes,
+        following: followFigureStyle,
+        style: figureStyle,
+        setStyle: setFigureStyle,
+        onShowSizes: (field) => {
+          if (followFigureStyle) {
+            openFigureStyleEditor();
+            focusTextSizeField(() => document.querySelector(".gl-figure-style-editor"), field);
+          } else {
+            setSection("style");
+            focusTextSizeField(() => styleSectionRef.current, field);
+          }
+        },
+        t,
+      }),
+    };
+  };
   const openGridMenu = (event: React.MouseEvent<HTMLDivElement>) => {
     if (!panelCount) return;
+    const text = textSizeItems(event.target);
     const cell = (event.target as HTMLElement).closest<HTMLElement>(".mini-plot-cell");
     const owner = cell ? stepOwners.find((entry) => entry.gateId === cell.dataset.plotKey) : undefined;
     const gate = owner ? state.gates[owner.gateId] : undefined;
@@ -662,6 +738,8 @@ export function StrategyTab({
       y: event.clientY,
       label: t("Gating strategy"),
       items: [
+        // A right-click on text puts its size first; elsewhere the way to the sizes comes last.
+        ...(text.kind ? [...text.items, "separator" as const] : []),
         { label: t("Add the strategy to the Layout tab"), title: strategyToLayoutTitle, disabled: !strategyRecipe() || !onAddToLayout, onClick: addStrategyToLayout },
         ...stepItems,
         { label: t("Fit data + gates"), title: t("Fit every plot shown here to its data and the gates on it"), onClick: () => onFitChannels(shownChannels.current) },
@@ -669,6 +747,7 @@ export function StrategyTab({
         { label: t("Export PNG"), onClick: () => void exportStrategy("png") },
         { label: t("Export SVG"), onClick: () => void exportStrategy("svg") },
         { label: t("Export PDF"), onClick: () => void exportStrategy("pdf") },
+        ...(text.kind ? [] : ["separator" as const, ...text.items]),
       ],
     });
   };
@@ -700,23 +779,13 @@ export function StrategyTab({
     setter(Number.isFinite(v) ? v : fallback);
   };
 
-  /** What is drawn, in the heading: the file or the pool, and the tree. */
-  const headContext = `${pooled ? t("{count} {unit} pooled", { count: poolList.length, unit }) : sampleName} · ${state.hierarchies.find(h => h.id === state.active_hierarchy_id)?.name ?? ""}`;
+  /** What is drawn, beside the status: the file or the pool, and the tree. */
+  const drawnContext = `${pooled ? t("{count} {unit} pooled", { count: poolList.length, unit }) : sampleName} · ${state.hierarchies.find(h => h.id === state.active_hierarchy_id)?.name ?? ""}`;
   return (
     <div className="gl-tab-panel gl-tab-fill gl-plotting-workspace gl-strategy-workspace">
-      <div className="gl-plotting-head">
-        <strong>{t("Gating strategy")}</strong>
-        <span title={headContext}>{headContext}</span>
-        <span title={t("Trace a gating path or back-gate selected populations.")}>{t("Trace a gating path or back-gate selected populations.")}</span>
-        {onAddToLayout && (
-          <div className="gl-plotting-head-actions">
-            <button type="button" className="gl-mini-btn" disabled={renderPending || !panelCount || !strategyRecipe()} title={strategyToLayoutTitle} onClick={addStrategyToLayout}>
-              {t("Add to Layout")}
-            </button>
-          </div>
-        )}
-      </div>
-      {/* The side tabs Illustration and Plotting have: what to draw first, then how it looks. */}
+      {/* No header row, as on the Illustration and Plotting tabs: the strategies' tabs are above,
+          and Add to Layout is under Export. The side tabs those two have: what to draw first,
+          then how it looks. */}
       <aside className="gl-plotting-inspector gl-strategy-inspector" aria-label={t("Strategy controls")}>
         <nav className="gl-presentation-tabs" aria-label={t("Strategy settings")}>
           {STRATEGY_SECTIONS.map((id) => (
@@ -865,7 +934,7 @@ export function StrategyTab({
             onClick={() => onFitChannels(shownChannels.current)}
           >{t("Fit data + gates")}</button>
         </section>
-        <section className="gl-strategy-section" hidden={section !== "style"} aria-label={t("Style")}>
+        <section ref={styleSectionRef} className="gl-strategy-section" hidden={section !== "style"} aria-label={t("Style")}>
           <h3>{t("Display")}</h3>
           {modeOpts.map((m) => (
             <label key={m.v} className="gl-check">
@@ -985,14 +1054,21 @@ export function StrategyTab({
           <FigureStyleFollow following={followFigureStyle} onFollow={setFollowFigureStyle} />
           {!followFigureStyle && (
             <>
-              <label className="gl-field-inline">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
-              <label className="gl-field-inline">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
-              <label className="gl-field-inline">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
-              <label className="gl-field-inline">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
+              <label className="gl-field-inline" data-text-size="fontTick">{t("Tick")}<input type="number" min={6} max={24} value={fontTick} onChange={num(setFontTick, 8)} /></label>
+              <label className="gl-field-inline" data-text-size="fontAxis">{t("Axis")}<input type="number" min={6} max={28} value={fontAxis} onChange={num(setFontAxis, 10)} /></label>
+              <label className="gl-field-inline" data-text-size="fontTitle">{t("Title")}<input type="number" min={6} max={28} value={fontTitle} onChange={num(setFontTitle, 10)} /></label>
+              <label className="gl-field-inline" data-text-size="fontGate">{t("Gate")}<input type="number" min={6} max={24} value={fontGate} onChange={num(setFontGate, 8)} /></label>
             </>
           )}
         </section>
         <section className="gl-strategy-section" hidden={section !== "export"} aria-label={t("Export")}>
+          {onAddToLayout && <h3>{t("To the Layout tab")}</h3>}
+          {onAddToLayout && (
+            <button type="button" className="gl-mini-btn" disabled={renderPending || !panelCount || !strategyRecipe()} title={strategyToLayoutTitle} onClick={addStrategyToLayout}>
+              {t("Add to Layout")}
+            </button>
+          )}
+          {onAddToLayout && <h3>{t("Export")}</h3>}
           <label className="gl-field-inline" title="Export resolution for SVG/PDF (72–1200 DPI)">
             DPI
             <input type="number" min={72} max={1200} step={1} value={exportDpi} onChange={(e) => setExportDpi(Math.max(72, Math.min(1200, Math.round(+e.target.value) || 300)))} />
@@ -1013,10 +1089,15 @@ export function StrategyTab({
       </aside>
       <div className="gl-prop-body gl-strategy-body">
         {renderError && <p role="alert">{renderError}</p>}
-        <p role="status">{statusText}</p>
-        {/* data-state tells an agent's render when the grid is finished, or why there is none. */}
+        <div className="gl-strategy-status">
+          <p role="status">{statusText}</p>
+          <span title={drawnContext}>{drawnContext}</span>
+        </div>
+        {/* The scrolling box, and in it the page the strategy is drawn on, as wide and as tall as
+            what is drawn: the renderer's container, which it empties and fills, and beside it the
+            corner grip, which the renderer must not empty. */}
         <div
-          id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }} className="gl-mini-grid-container" onContextMenu={openGridMenu}
+          ref={viewportRef} className="gl-mini-grid-container gl-strategy-viewport" onContextMenu={openGridMenu}
           // A panel of the multi-population grid carries the renderer's own right-click menu ("Copy
           // image", "Download PNG"), which stops the event and so kept this tab's menu from opening
           // on a panel; its entries do nothing here, since the menu closes on the press that would
@@ -1026,8 +1107,31 @@ export function StrategyTab({
             event.stopPropagation();
             openGridMenu(event);
           }}
-          data-state={renderPending ? "drawing" : !poolReady ? "preparing" : renderError ? "error" : panelCount ? "drawn" : "empty"}
-        />
+        >
+          <div className={panelCount > 0 ? "gl-strategy-page is-drawn" : "gl-strategy-page"} ref={pageRef} style={dragScale !== 1 ? { transform: `scale(${dragScale})`, transformOrigin: "0 0" } : undefined}>
+            {/* data-state tells an agent's render when the grid is finished, or why there is none. */}
+            <div
+              id="strategy-grid-container" ref={containerRef} aria-busy={renderPending} style={{ opacity: renderPending ? .5 : 1 }}
+              data-state={renderPending ? "drawing" : !poolReady ? "preparing" : renderError ? "error" : panelCount ? "drawn" : "empty"}
+            />
+            {/* The grip in the page's bottom-right corner, as the Illustration figure and the
+                Plotting chart have one: a drag sets Plot size, a double-click fits the columns. */}
+            {panelCount > 0 && (
+              <FigureResizeHandle
+                page={() => pageRef.current}
+                size={drawnSize ?? plotSize}
+                range={[120, FIT_MAX_PLOT_SIZE]}
+                sizeLabel={t("Plot size")}
+                disabled={renderPending}
+                onPreview={setDragScale}
+                // A size dragged is the size wanted, as one typed is: Fit to columns goes off with it.
+                onCommit={(size) => { setPlotSize(size); setFitToColumns(false); }}
+                fitScale={() => null}
+                onFit={() => setFitToColumns(true)}
+              />
+            )}
+          </div>
+        </div>
       </div>
       <ContextMenu menu={menu} onClose={() => setMenu(null)} />
     </div>

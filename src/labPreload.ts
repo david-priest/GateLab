@@ -17,6 +17,7 @@ export const LAB_PRELOAD_DELAY_MS = 5000;
 
 const CHUNKS: readonly (() => Promise<unknown>)[] = [
   () => import("./ui/CompensationTab"),
+  () => import("./ui/TitrationWorkspace"),
   () => import("./ui/LayoutTab"),
   () => import("./imaging/CellHoverProbe"),
   () => import("./imaging/CellInspector"),

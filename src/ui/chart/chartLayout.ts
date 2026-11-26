@@ -8,6 +8,20 @@ export interface ChartPanelLayout {
   rotateLabels: boolean;
 }
 
+/** A category label's width a character, in ems of the tick font; a grid's headings are counted the same. */
+export const LABEL_CHAR_EM = 0.58;
+/** A panel title's width a character, in ems of the title font. */
+export const TITLE_CHAR_EM = 0.62;
+/** A value-axis tick label's or value-axis title's width a character, in ems of its font. */
+export const TICK_CHAR_EM = 0.6;
+/** Half a ridgeline's value tick label a character, in ems of the tick font, for leaving out a label that would run into the one before. */
+export const TICK_HALF_CHAR_EM = 0.32;
+
+/** A text's drawn width, counted per character: `chars` characters at `font` px, each `em` of the font wide. */
+export function textWidth(chars: number, font: number, em: number): number {
+  return chars * font * em;
+}
+
 /** The plot's width: the panel's whole width less its margins when set (an Illustration panel's size), else `natural`. */
 export function fittedInnerWidth(panelWidth: number, margin: { left: number; right: number }, natural: number): number {
   return panelWidth > 0 ? Math.max(40, panelWidth - margin.left - margin.right) : natural;
@@ -15,7 +29,7 @@ export function fittedInnerWidth(panelWidth: number, margin: { left: number; rig
 
 /** The longest category label's width, each label counted to at most `maxChars` characters. */
 export function longestLabelWidth(labels: readonly string[], tickFont: number, maxChars = Infinity): number {
-  return Math.max(0, ...labels.map((label) => Math.min(label.length, maxChars) * tickFont * 0.58));
+  return Math.max(0, ...labels.map((label) => textWidth(Math.min(label.length, maxChars), tickFont, LABEL_CHAR_EM)));
 }
 
 /** The least room, in pixels, kept between two category labels drawn level side by side. */
@@ -48,7 +62,7 @@ export function rotatedLabelsBottom(longestLabelPx: number, minBottom: number): 
 
 /** Each category label's drawn width at the tick font, counted to at most `maxChars` characters as `compactChartLabel` shortens it. */
 export function labelWidths(labels: readonly string[], tickFont: number, maxChars = Infinity): number[] {
-  return labels.map((label) => Math.min(label.length, maxChars) * tickFont * 0.58);
+  return labels.map((label) => textWidth(Math.min(label.length, maxChars), tickFont, LABEL_CHAR_EM));
 }
 
 /**

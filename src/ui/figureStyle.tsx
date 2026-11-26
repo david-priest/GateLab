@@ -97,7 +97,7 @@ export function FigureStyleEditor({ onClose }: Readonly<{ onClose: () => void }>
         <fieldset className="gl-figure-style-fields">
           <legend>{t("Text sizes (pt)")}</legend>
           {TEXT_FIELDS.map(({ key, label }) => (
-            <label key={key} className="gl-field-inline">
+            <label key={key} className="gl-field-inline" data-text-size={key}>
               {t(label)}
               <NumberField aria-label={t(label)} value={ptFromPx(style[key])} min={ptRange(key)[0]} max={ptRange(key)[1]} step={0.5} format={formatPt} onCommit={(pt) => set(key, pt)} />
             </label>
@@ -158,7 +158,7 @@ export function FigureStyleField({ styleKey, label, title }: Readonly<{ styleKey
   const { style, setStyle } = useFigureStyle();
   const [lo, hi] = LAYOUT_STYLE_RANGES[styleKey].map(ptFromPx);
   return (
-    <label className="gl-field-inline" title={title}>
+    <label className="gl-field-inline" title={title} data-text-size={styleKey === "histLineWidth" ? undefined : styleKey}>
       {label}
       <NumberField
         aria-label={label}
@@ -204,7 +204,7 @@ export function FigureTypography({ following, onFollow, sizes, children }: Reado
       {sizes.map(({ key, value, min, max, onCommit }) => following ? (
         <FigureStyleField key={key} styleKey={key} label={t(TEXT_LABEL[key])} />
       ) : (
-        <label key={key} className="gl-field-inline">
+        <label key={key} className="gl-field-inline" data-text-size={key}>
           {t(TEXT_LABEL[key])}
           <NumberField aria-label={t(TEXT_LABEL[key])} value={value} min={min} max={max} integer onCommit={onCommit} />
         </label>

@@ -23,6 +23,10 @@ import {
   captureFigureTransforms,
   heatmapChannels,
   histogramChannels,
+  biplotAxisChannels,
+  biplotChannelPairs,
+  severalAxisChannels,
+  CHANNEL_DIMENSIONS,
   figureHierarchies,
   figurePopulationOptions,
   figurePopulationApplies,
@@ -53,6 +57,7 @@ import { buildFigureChartPanel, type FigureChartData } from "./figureChartData";
 import { applyFigureChartStyle, figureStatisticAxes } from "./FigureChartPanel";
 import { defaultCellChannel } from "./PlottingTab";
 import { treeLabelMove } from "../engine/illustration";
+import { QcSheets } from "./QcSheets";
 import { FileChecklist } from "./FileChecklist";
 import { lastPaths, PopulationChecklist, type PopulationChecklistRow } from "./PopulationChecklist";
 import { populationColorOf } from "../engine/palettes";
@@ -89,6 +94,7 @@ import { GATE_EDGE_MODES, type GateEdgeMode } from "./gateEdgeModes";
 import "./figure.css";
 import { NumberField } from "./NumberField";
 import { FigureStyleField, FigureTypography, useFigureStyle } from "./figureStyle";
+import { focusTextSizeField, plotTextKind, textSizeMenuEntries, type PlotTextKind } from "./textSizeMenu";
 import { useGateInk } from "../plots/gateInk";
 import { highlightedPopIds } from "./gateSelection";
 
@@ -146,6 +152,10 @@ const refKey = (ref: FigurePopulation) =>
 const dimensionLabel = (dimension: FigureDimension) =>
   dimension === "samples"
     ? "files / samples"
+    : dimension === "xchannels"
+      ? "X channels"
+      : dimension === "ychannels"
+        ? "Y channels"
     : dimension.startsWith("popmeta:")
       ? `populations by ${dimension.slice(8)}`
       : dimension.replace("metadata:", "");
@@ -224,7 +234,7 @@ export function IllustrationTab({
   // pubStyle, gateLineWidth and labelBackground are still saved but give way to it.
   const ink = useGateInk();
   // Following the workspace's figure style, its text sizes and histogram line width give way to it.
-  const { style: figureStyleShared } = useFigureStyle();
+  const { style: figureStyleShared, setStyle: setFigureStyleShared } = useFigureStyle();
   const config = useMemo<IllustrationConfig>(
     () => ({
       ...storedConfig,
@@ -238,6 +248,7 @@ export function IllustrationTab({
     [storedConfig, ink.coloured, ink.lineWidth, ink.labelBackground, figureStyleShared],
   );
   const figure = config.figure!;
+  const [showQcSheets, setShowQcSheets] = useState(false);
   const [section, setSection] = useState("data");
   // One plot is shown at a time, chosen by the tabs across the top as the Layout tab chooses its
   // sheet; its editor is the one in Plots. The choice is the session's: the saved figure keeps
@@ -635,9 +646,37 @@ export function IllustrationTab({
     const recipe = figureChartRecipe(panel, figure, config, (sampleId) => samples.some((s) => s.id === sampleId), trees, chartValueRange(panel));
     return recipe ? [recipe] : [];
   };
+  /** The text sizes the figure draws with, as Typography shows them and the right-click menu steps them. */
+  const typographySizes = (["fontTick", "fontAxis", "fontTitle", "fontGate"] as const).map((key) => ({
+    key,
+    value: config[key],
+    min: 8,
+    max: 24,
+    onCommit: (size: number) => style({ [key]: size }),
+  }));
+  /** Larger and smaller for the text under the pointer, and the way to Typography, opened on that text's field. */
+  const textSizeItems = (target: EventTarget | null): { kind: PlotTextKind | null; items: MenuEntry[] } => {
+    const kind = plotTextKind(target);
+    return {
+      kind,
+      items: textSizeMenuEntries({
+        kind,
+        sizes: typographySizes,
+        following: !!config.followFigureStyle,
+        style: figureStyleShared,
+        setStyle: setFigureStyleShared,
+        onShowSizes: (field) => {
+          setSection("style");
+          focusTextSizeField(() => document.getElementById("figure-section-style"), field);
+        },
+        t,
+      }),
+    };
+  };
   /** The menu a right-click on a panel opens: the panel, its row or its column to the Layout tab; the Gating tab; the figure's data. */
   const openPanelMenu = (panel: FigurePanel, event: ReactMouseEvent<HTMLElement>) => {
     event.preventDefault();
+    const text = textSizeItems(event.target);
     // A right-click on a panel outside the selection selects that panel, as it does on the
     // Layout tab and in the vector editors; inside it, the menu acts on the selection.
     const chosen = selectedPanelKeys.has(panel.key) ? selectedPanels : [panel];
@@ -689,7 +728,9 @@ export function IllustrationTab({
         onClick: () => editFigure({ sampleIds: figure.sampleIds.filter((id) => !panel.samples.includes(id)) }),
       },
     ];
-    setPanelMenu({ x: event.clientX, y: event.clientY, items, label: `${panel.population.label} panel` });
+    // A right-click on text puts its size first; elsewhere the way to the sizes comes last.
+    const withText: MenuEntry[] = text.kind ? [...text.items, "separator", ...items] : [...items, "separator", ...text.items];
+    setPanelMenu({ x: event.clientX, y: event.clientY, items: withText, label: `${panel.population.label} panel` });
   };
   /**
    * The heatmap matrix's menu: the heatmap goes to the Layout tab on its own or with the whole
@@ -763,7 +804,7 @@ export function IllustrationTab({
       meta: meta(ref),
     }));
   };
-  const figureChannels = useMemo(() => [...new Set(figure.plots.flatMap((plot) => (plot.type === "histogram" ? histogramChannels(plot) : plot.type === "chart" ? [plot.x] : [plot.x, plot.y])).filter(Boolean))], [figure.plots]);
+  const figureChannels = useMemo(() => [...new Set(figure.plots.flatMap((plot) => (plot.type === "histogram" ? histogramChannels(plot) : plot.type === "chart" ? [plot.x] : plot.type === "biplot" ? biplotChannelPairs(plot).flatMap((pair) => [pair.x, pair.y]) : [plot.x, plot.y])).filter(Boolean))], [figure.plots]);
   const selectedSamples = figure.sampleIds
     .map((id) => samples.find((s) => s.id === id))
     .filter((s): s is FigureSample => !!s);
@@ -944,6 +985,18 @@ export function IllustrationTab({
     };
     patch[location].push(dimension);
     editFigure(patch);
+  }
+  /**
+   * The shelves once an axis's channel dimension is placed, beside the plots dimension, as it is
+   * when a plot first takes several channels on that axis; unchanged when it is already placed.
+   */
+  function shelvesWithChannels(axis: "x" | "y"): Partial<FigureSpec> {
+    const dimension = CHANNEL_DIMENSIONS[axis];
+    if (placedDimensions.includes(dimension)) return {};
+    const shelf = (["rows", "columns", "pages"] as const).find((location) => figure[location].includes("plots")) ?? "columns";
+    const list = [...figure[shelf]];
+    list.splice(list.indexOf("plots") + 1 || list.length, 0, dimension);
+    return { [shelf]: list };
   }
   async function exportPage() {
     if (!page || pending || problems.length || exporting) return;
@@ -1136,6 +1189,13 @@ export function IllustrationTab({
                 <p role="alert">
                   {t("A saved file is missing. Restore it or use the current checked files.")}
                 </p>
+              )}
+              {onAddPanelPagesToLayout && (
+                <details onToggle={(e) => { if (e.currentTarget.open) setShowQcSheets(true); }}>
+                  <FoldSummary>{t("QC sheets")}</FoldSummary>
+                  {showQcSheets && <QcSheets figure={figure} files={selectedSamples} trees={trees}
+                    onCreate={(sheets) => onAddPanelPagesToLayout(sheets, figure.panelSize)} />}
+                </details>
               )}
               <h3 title={t("A population applies to the files whose tree has it. Correspondence is by provenance, not by name.")}>
                 Populations <span>{figure.populations.length} selected</span>
@@ -1450,6 +1510,8 @@ export function IllustrationTab({
                               plots: figure.plots.map((p) =>
                                 p.id === plot.id ? { ...p, x: next[0], channels: next } : p,
                               ),
+                              // A histogram's first second channel puts the X channels on a shelf.
+                              ...(!heatmap && chosen.length < 2 && next.length > 1 ? shelvesWithChannels("x") : {}),
                             });
                           }}
                         />
@@ -1458,27 +1520,73 @@ export function IllustrationTab({
                   })()}
                   {(["x", "y"] as const)
                     .filter((axis) => plot.type !== "heatmap" && plot.type !== "histogram" && (axis === "x" || plot.type === "biplot") && !(plot.type === "chart" && plot.chart?.valueKind === "proportion"))
-                    .map((axis) => (
-                      <label key={axis}>
-                        {plot.type === "chart" ? t("Channel") : `${axis.toUpperCase()} channel`}
-                        <SearchableSelect
-                          label={plot.type === "chart" ? t("Channel") : `${axis.toUpperCase()} channel`}
-                          className="gl-searchable-select-field"
-                          value={plot[axis]}
-                          options={[
-                            ...(channels.some(([key]) => key === plot[axis]) ? [] : [{ value: plot[axis], label: "Unavailable channel" }]),
-                            ...channels.map(([key, label]) => ({ value: key, label })),
-                          ]}
-                          onChange={(value) =>
-                            editFigure({
-                              plots: figure.plots.map((p) =>
-                                p.id === plot.id ? { ...p, [axis]: value } : p,
-                              ),
-                            })
-                          }
-                        />
-                      </label>
-                    ))}
+                    .map((axis) => {
+                      // A biplot's axis may take several channels, each crossed with the other
+                      // axis's as a plot of its own; the field sets the first of them.
+                      const several = plot.type === "biplot" ? biplotAxisChannels(plot, axis) : null;
+                      const setAxis = (next: string[]) =>
+                        editFigure({
+                          plots: figure.plots.map((p) =>
+                            p.id === plot.id
+                              ? axis === "x"
+                                ? { ...p, x: next[0], channels: next.length > 1 ? next : undefined }
+                                : { ...p, y: next[0], yChannels: next.length > 1 ? next : undefined }
+                              : p,
+                          ),
+                          // The axis's first second channel puts its channels on a shelf, to move as files and populations are.
+                          ...(several && several.length < 2 && next.length > 1 ? shelvesWithChannels(axis) : {}),
+                        });
+                      return (
+                        <div key={axis} className="gl-figure-axis-channels">
+                          <label>
+                            {plot.type === "chart" ? t("Channel") : `${axis.toUpperCase()} channel`}
+                            <SearchableSelect
+                              label={plot.type === "chart" ? t("Channel") : `${axis.toUpperCase()} channel`}
+                              className="gl-searchable-select-field"
+                              value={plot[axis]}
+                              options={[
+                                ...(channels.some(([key]) => key === plot[axis]) ? [] : [{ value: plot[axis], label: "Unavailable channel" }]),
+                                ...channels.map(([key, label]) => ({ value: key, label })),
+                              ]}
+                              onChange={(value) =>
+                                several
+                                  ? setAxis([value, ...several.slice(1).filter((key) => key !== value)])
+                                  : editFigure({
+                                      plots: figure.plots.map((p) =>
+                                        p.id === plot.id ? { ...p, [axis]: value } : p,
+                                      ),
+                                    })
+                              }
+                            />
+                          </label>
+                          {several && (
+                            <details className="gl-figure-axis-more">
+                              <FoldSummary>
+                                <span title={t("Tick several channels to draw a biplot for each, crossed with the other axis's channels, as plots of their own")}>
+                                  {t("{axis} channels: {count}", { axis: axis.toUpperCase(), count: String(several.length) })}
+                                </span>
+                              </FoldSummary>
+                              <ChannelChecklist
+                                label={t("{axis} channels · {name}", { axis: axis.toUpperCase(), name: plot.name })}
+                                options={[
+                                  ...several.filter((key) => !channels.some(([option]) => option === key)).map((key) => ({ key, label: t("{name} (unavailable)", { name: key }) })),
+                                  ...channels.map(([key, label]) => ({ key, label })),
+                                ]}
+                                checked={several}
+                                onToggle={(keys, on) => {
+                                  const kept = on
+                                    ? [...several, ...keys.filter((key) => !several.includes(key))]
+                                    : several.filter((key) => !keys.includes(key));
+                                  // An axis keeps at least one channel: unticking every one leaves the first.
+                                  const next = kept.length ? kept : several.slice(0, 1);
+                                  if (next.join("\u0000") !== several.join("\u0000")) setAxis(next);
+                                }}
+                              />
+                            </details>
+                          )}
+                        </div>
+                      );
+                    })}
                   <label>
                     {t("Populations")}
                     <select
@@ -1640,7 +1748,7 @@ export function IllustrationTab({
                   chips: figure[location].map((d) => ({
                     id: d,
                     label: t(dimensionLabel(d)),
-                    removable: d.startsWith("metadata:") || d.startsWith("popmeta:"),
+                    removable: d.startsWith("metadata:") || d.startsWith("popmeta:") || d === "xchannels" || d === "ychannels",
                   })),
                 }))}
                 places={[
@@ -1659,7 +1767,7 @@ export function IllustrationTab({
                 }}
               />
               <label>
-                Add metadata grouping
+                Add grouping
                 <select
                   value=""
                   onChange={(e) => {
@@ -1667,6 +1775,15 @@ export function IllustrationTab({
                   }}
                 >
                   <option value="">Choose field…</option>
+                  {(["x", "y"] as const).some((axis) => !placedDimensions.includes(CHANNEL_DIMENSIONS[axis]) && figure.plots.some((p) => severalAxisChannels(p, axis))) && (
+                    <optgroup label={t("Channels")}>
+                      {(["x", "y"] as const)
+                        .filter((axis) => !placedDimensions.includes(CHANNEL_DIMENSIONS[axis]) && figure.plots.some((p) => severalAxisChannels(p, axis)))
+                        .map((axis) => (
+                          <option key={axis} value={CHANNEL_DIMENSIONS[axis]}>{t(dimensionLabel(CHANNEL_DIMENSIONS[axis]))}</option>
+                        ))}
+                    </optgroup>
+                  )}
                   <optgroup label={t("Files / samples")}>
                     {metadataFields
                       .filter((field) => !placedDimensions.includes(`metadata:${field}`))
@@ -2137,13 +2254,7 @@ export function IllustrationTab({
               <FigureTypography
                 following={!!config.followFigureStyle}
                 onFollow={(followFigureStyle) => style({ followFigureStyle })}
-                sizes={(["fontTick", "fontAxis", "fontTitle", "fontGate"] as const).map((key) => ({
-                  key,
-                  value: config[key],
-                  min: 8,
-                  max: 24,
-                  onCommit: (size: number) => style({ [key]: size }),
-                }))}
+                sizes={typographySizes}
               >
                 <label><input type="checkbox" checked={config.scaleFontsWithPlot} onChange={e => style({ scaleFontsWithPlot: e.target.checked })} />{t("Scale fonts with panel size")}</label>
                 <p>{config.scaleFontsWithPlot ? t("Font sizes are specified at a 280 px panel and scale proportionally.") : t("Font sizes stay fixed when you resize a panel.")}</p>

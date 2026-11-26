@@ -110,4 +110,60 @@ describe("the Strategy tab's settings in the workspace file", () => {
     expect(strategy).toBeTruthy();
     expect(strategy).toMatchObject({ mode: "multi", layout: "flow", gateLabelBold: true, showArrows: true, pointSize: 1.2, exportTree: true });
   });
+
+  // The tab holds several strategies, a tab each. The shown one's controls stay the record's own
+  // fields, where a GateLab from before the tabs reads them; the others ride in its list.
+  it("saves every strategy, and shows them as they were left when the tab is opened again", async () => {
+    const written: unknown[] = [];
+    const handle = {
+      kind: "file",
+      name: "analysis.gatelab",
+      createWritable: async () => ({ write: async (chunk: unknown) => { written.push(chunk); }, close: async () => undefined }),
+      getFile: async () => new File([], "analysis.gatelab"),
+    } as unknown as FileSystemFileHandle;
+    Object.defineProperty(window, "showOpenFilePicker", { configurable: true, value: vi.fn() });
+    Object.defineProperty(window, "showSaveFilePicker", { configurable: true, value: vi.fn(async () => handle) });
+    act(() => root.render(<App />));
+    const input = [...host.querySelectorAll<HTMLInputElement>('input[type="file"][accept=".fcs"]')].find((i) => !i.hasAttribute("webkitdirectory"))!;
+    const bytes = Uint8Array.from([1]);
+    const file = new File([bytes], "D1.fcs");
+    Object.defineProperty(file, "arrayBuffer", { value: async () => bytes.buffer.slice(0) });
+    Object.defineProperty(input, "files", { configurable: true, value: [file] });
+    await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+    for (let i = 0; i < 3; i++) await settle();
+
+    await act(async () => { button("Strategy").click(); });
+    await settle();
+    await act(async () => { labelled("Bold gate labels").querySelector("input")!.click(); });
+    await settle();
+    await act(async () => { host.querySelector<HTMLButtonElement>('[aria-label="New strategy"]')!.click(); });
+    await settle();
+    const tabs = () => [...host.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Strategies"] [role="tab"]')];
+    expect(tabs().map((tab) => tab.textContent)).toEqual(["Strategy 1", "Strategy 2"]);
+    await act(async () => { labelled("Multiple pops").querySelector("input")!.click(); });
+    await settle();
+
+    // Leaving the tab and returning shows the strategies as they were left.
+    await act(async () => { button("Gating").click(); });
+    await settle();
+    await act(async () => { button("Strategy").click(); });
+    await settle();
+    expect(tabs().map((tab) => tab.textContent)).toEqual(["Strategy 1", "Strategy 2"]);
+    expect(tabs().find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent).toBe("Strategy 2");
+
+    await act(async () => { button("Save As…").click(); });
+    for (let i = 0; i < 4; i++) await settle();
+    expect(written.length).toBeGreaterThan(0);
+    const chunk = written[0] as Uint8Array | string;
+    const saved = readWorkspaceBytes(typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk as Uint8Array));
+    const strategy = (saved.ws as { strategy?: Record<string, unknown> }).strategy as {
+      mode: string; gateLabelBold?: boolean;
+      strategies: { activeId: string; items: { id: string; name: string; config?: Record<string, unknown> }[] };
+    };
+    expect(strategy).toMatchObject({ mode: "multi", gateLabelBold: false });
+    expect(strategy.strategies.items.map((item) => item.name)).toEqual(["Strategy 1", "Strategy 2"]);
+    expect(strategy.strategies.items[0].config).toMatchObject({ mode: "single", gateLabelBold: true });
+    expect(strategy.strategies.items[1].config).toBeUndefined();
+    expect(strategy.strategies.activeId).toBe(strategy.strategies.items[1].id);
+  });
 });
